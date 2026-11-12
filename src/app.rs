@@ -40,15 +40,17 @@ enum PanelKind {
     Playlists,
     Equalizer,
     Visualizer,
+    SpatialAudio,
 }
 
-const PANEL_KINDS: [PanelKind; 6] = [
+const PANEL_KINDS: [PanelKind; 7] = [
     PanelKind::CurrentPlaylist,
     PanelKind::Player,
     PanelKind::Downloader,
     PanelKind::Playlists,
     PanelKind::Equalizer,
     PanelKind::Visualizer,
+    PanelKind::SpatialAudio,
 ];
 
 impl PanelKind {
@@ -60,6 +62,7 @@ impl PanelKind {
             PanelKind::Playlists => 3,
             PanelKind::Equalizer => 4,
             PanelKind::Visualizer => 5,
+            PanelKind::SpatialAudio => 6,
         }
     }
 
@@ -71,6 +74,7 @@ impl PanelKind {
             PanelKind::Playlists => "playlists",
             PanelKind::Equalizer => "equalizer",
             PanelKind::Visualizer => "visualizer",
+            PanelKind::SpatialAudio => "spatial_audio",
         }
     }
 
@@ -82,6 +86,7 @@ impl PanelKind {
             PanelKind::Playlists => "Playlists",
             PanelKind::Equalizer => "Equalizer",
             PanelKind::Visualizer => "Audio visualizer",
+            PanelKind::SpatialAudio => "Spatial audio",
         }
     }
 }
@@ -184,6 +189,9 @@ impl PlayerApp {
         let (audio, status) = match AudioEngine::new() {
             Ok(engine) => {
                 engine.set_eq(&config.ui.eq_gains, config.ui.eq_enabled);
+                engine.set_spatial(config.ui.spatial_x, config.ui.spatial_y);
+                engine.set_room_size(config.ui.room_size);
+                engine.set_reverb(config.ui.reverb);
                 (Some(engine), None)
             }
             Err(err) => (None, Some(err)),
@@ -1473,6 +1481,7 @@ impl PlayerApp {
             PanelKind::Playlists => self.playlists_panel(&mut child),
             PanelKind::Equalizer => self.equalizer_panel(&mut child),
             PanelKind::Visualizer => self.visualizer_panel(&mut child),
+            PanelKind::SpatialAudio => self.spatial_panel(&mut child),
         }
     }
 
@@ -2751,6 +2760,266 @@ impl PlayerApp {
 
     fn visualizer_panel(&mut self, ui: &mut Ui) {
         self.visualizer_view(ui);
+    }
+
+    fn apply_spatial(&self) {
+        if let Some(audio) = &self.audio {
+            audio.set_spatial(self.config.ui.spatial_x, self.config.ui.spatial_y);
+            audio.set_room_size(self.config.ui.room_size);
+            audio.set_reverb(self.config.ui.reverb);
+        }
+    }
+
+    fn slider_row(
+        ui: &Ui,
+        rect: Rect,
+        id: &str,
+        label: &str,
+        value_text: &str,
+        fraction: f32,
+        theme: &Theme,
+    ) -> (egui::Response, Option<f32>) {
+        let painter = ui.painter();
+        painter.text(
+            pos2(rect.left(), rect.center().y),
+            Align2::LEFT_CENTER,
+            label,
+            FontId::proportional(9.5),
+            theme.muted(),
+        );
+        painter.text(
+            pos2(rect.right(), rect.center().y),
+            Align2::RIGHT_CENTER,
+            value_text,
+            FontId::proportional(9.5),
+            theme.faint(),
+        );
+
+        let slider = Rect::from_min_max(
+            pos2(rect.left() + 48.0, rect.center().y - 9.0),
+            pos2(rect.right() - 52.0, rect.center().y + 9.0),
+        );
+        ui::slider(ui, slider, id, fraction, true, theme)
+    }
+
+    /// Draggable speaker around the listener, plus room size and reverb.
+    fn spatial_panel(&mut self, ui: &mut Ui) {
+        let theme = self.theme;
+        let (head, _) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::hover());
+        let painter = ui.painter();
+        painter.text(
+            pos2(head.left(), head.center().y),
+            Align2::LEFT_CENTER,
+            "SPATIAL AUDIO",
+            FontId::proportional(10.5),
+            theme.muted(),
+        );
+        painter.text(
+            pos2(head.right(), head.center().y),
+            Align2::RIGHT_CENTER,
+            format!("{:.1} m room", self.config.ui.room_size),
+            FontId::proportional(10.5),
+            theme.faint(),
+        );
+
+        let area = ui.available_rect_before_wrap();
+        if area.width() < 60.0 || area.height() < 90.0 {
+            return;
+        }
+
+        let controls_height = 56.0;
+        let horizontal = area.width() > area.height() * 1.15;
+        let side = if horizontal {
+            (area.height() - 6.0).clamp(70.0, 460.0)
+        } else {
+            (area.width().min(area.height() - controls_height)).clamp(70.0, 460.0)
+        };
+        let canvas = Rect::from_min_size(area.min, vec2(side, side));
+        let center = canvas.center();
+        let radius = (side * 0.5 - 10.0).max(20.0);
+
+        // Room floor.
+        theme::gradient_rect(
+            ui.painter(),
+            canvas,
+            14.0,
+            theme::with_alpha(theme.panel_soft(), 200),
+            theme::with_alpha(theme.panel_bottom(), 220),
+            theme.angle,
+        );
+        for ring in 1..=3 {
+            ui.painter().circle_stroke(
+                center,
+                radius * ring as f32 / 3.0,
+                Stroke::new(
+                    1.0_f32,
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 16),
+                ),
+            );
+        }
+        for axis in 0..2 {
+            let (from, to) = if axis == 0 {
+                (
+                    pos2(canvas.left() + 8.0, center.y),
+                    pos2(canvas.right() - 8.0, center.y),
+                )
+            } else {
+                (
+                    pos2(center.x, canvas.top() + 8.0),
+                    pos2(center.x, canvas.bottom() - 8.0),
+                )
+            };
+            ui.painter().line_segment(
+                [from, to],
+                Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 12)),
+            );
+        }
+
+        let x = self.config.ui.spatial_x.clamp(-1.0, 1.0);
+        let y = self.config.ui.spatial_y.clamp(-1.0, 1.0);
+        let speaker = pos2(center.x + x * radius, center.y + y * radius);
+
+        // Link between listener and speaker.
+        ui.painter().line_segment(
+            [center, speaker],
+            Stroke::new(1.4_f32, theme::with_alpha(theme.accent_b, 150)),
+        );
+
+        // Listener.
+        ui.painter()
+            .circle_filled(center, 7.0, theme::with_alpha(theme.text(), 210));
+        ui.painter().circle_stroke(
+            center,
+            11.0,
+            Stroke::new(1.0_f32, theme::with_alpha(theme.text(), 90)),
+        );
+        ui::paint_glyph(
+            ui.painter(),
+            center,
+            12.0,
+            Glyph::Volume,
+            theme.bg(),
+        );
+
+        // Speaker.
+        ui.painter()
+            .circle_filled(speaker, 12.0, theme::with_alpha(theme.accent_a, 200));
+        ui.painter().circle_stroke(
+            speaker,
+            14.0,
+            Stroke::new(1.2_f32, theme::with_alpha(theme.accent_b, 200)),
+        );
+        ui::paint_glyph(ui.painter(), speaker, 14.0, Glyph::Volume, theme.text());
+
+        let distance = (x * x + y * y).sqrt();
+        let meters = distance * self.config.ui.room_size;
+        let pan_text = if x.abs() < 0.05 {
+            "CENTER".to_string()
+        } else {
+            format!(
+                "{} {:.0}%",
+                if x < 0.0 { "LEFT" } else { "RIGHT" },
+                x.abs() * 100.0
+            )
+        };
+        ui.painter().text(
+            pos2(canvas.left() + 10.0, canvas.bottom() - 10.0),
+            Align2::LEFT_BOTTOM,
+            format!("{meters:.1} m · {pan_text}"),
+            FontId::proportional(9.5),
+            theme.faint(),
+        );
+
+        let response = ui.interact(
+            canvas,
+            Id::unique("spatial-room"),
+            Sense::click_and_drag(),
+        );
+        if response.dragged() || response.clicked() {
+            if let Some(pointer) = response.interact_pointer_pos() {
+                let dx = (pointer.x - center.x) / radius;
+                let dy = (pointer.y - center.y) / radius;
+                let length = (dx * dx + dy * dy).sqrt();
+                let (nx, ny) = if length > 1.0 {
+                    (dx / length, dy / length)
+                } else {
+                    (dx, dy)
+                };
+                self.config.ui.spatial_x = nx.clamp(-1.0, 1.0);
+                self.config.ui.spatial_y = ny.clamp(-1.0, 1.0);
+                self.apply_spatial();
+            }
+        }
+        if response.drag_stopped() || response.clicked() {
+            self.save_config();
+        }
+
+        // Room size and reverb.
+        let controls = if horizontal {
+            Rect::from_min_max(
+                pos2(canvas.right() + 14.0, area.top()),
+                pos2(area.right(), area.bottom()),
+            )
+        } else {
+            Rect::from_min_max(
+                pos2(area.left(), canvas.bottom() + 6.0),
+                pos2(area.right(), area.bottom()),
+            )
+        };
+        let row_height = if horizontal {
+            26.0
+        } else {
+            (controls.height() / 2.0).min(26.0)
+        };
+        let block_height = row_height * 2.0 + 2.0;
+        let block_top = if horizontal {
+            (controls.top() + (controls.height() - block_height) * 0.5).max(controls.top())
+        } else {
+            controls.top()
+        };
+        let room_row = Rect::from_min_size(
+            pos2(controls.left(), block_top),
+            vec2(controls.width(), row_height),
+        );
+        let reverb_row = Rect::from_min_size(
+            pos2(controls.left(), block_top + row_height + 2.0),
+            vec2(controls.width(), row_height),
+        );
+
+        let room_fraction = ((self.config.ui.room_size - 2.0) / 22.0).clamp(0.0, 1.0);
+        let (room_response, requested) = Self::slider_row(
+            ui,
+            room_row,
+            "spatial-room-size",
+            "ROOM",
+            &format!("{:.1} m", self.config.ui.room_size),
+            room_fraction,
+            &theme,
+        );
+        if let Some(fraction) = requested {
+            self.config.ui.room_size = 2.0 + fraction * 22.0;
+            self.apply_spatial();
+        }
+        if room_response.drag_stopped() || room_response.clicked() {
+            self.save_config();
+        }
+
+        let (reverb_response, requested) = Self::slider_row(
+            ui,
+            reverb_row,
+            "spatial-reverb",
+            "REVERB",
+            &format!("{:.0}%", self.config.ui.reverb * 100.0),
+            self.config.ui.reverb,
+            &theme,
+        );
+        if let Some(fraction) = requested {
+            self.config.ui.reverb = fraction;
+            self.apply_spatial();
+        }
+        if reverb_response.drag_stopped() || reverb_response.clicked() {
+            self.save_config();
+        }
     }
 
     fn visualizer_view(&mut self, ui: &mut Ui) {

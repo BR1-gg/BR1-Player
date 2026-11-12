@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 pub const DEFAULT_QUALITY: u16 = 192;
 pub const DEFAULT_PARALLEL: usize = 3;
-pub const PANEL_COUNT: usize = 6;
+pub const PANEL_COUNT: usize = 7;
 pub const EQ_BANDS: usize = 10;
 
 /// One dashboard panel, stored as a fraction of the dashboard's inner area so
@@ -412,6 +412,13 @@ pub struct UiConfig {
     pub panels: [PanelRect; PANEL_COUNT],
     pub eq_enabled: bool,
     pub eq_gains: [f32; EQ_BANDS],
+    /// Emitter position inside the spatial room, -1..1 from the listener.
+    pub spatial_x: f32,
+    pub spatial_y: f32,
+    /// Room dimension in metres (scales distance and reverb length).
+    pub room_size: f32,
+    /// Reverb wet level, 0..1.
+    pub reverb: f32,
     pub volume: f32,
     pub muted: bool,
     /// Apple-style liquid glass for the selected component groups.
@@ -459,9 +466,21 @@ impl Default for UiConfig {
                     h: 0.29676,
                     visible: false,
                 },
+                // Spatial audio — hidden until added from the component menu
+                PanelRect {
+                    x: 0.23267,
+                    y: 0.65413,
+                    w: 0.29876,
+                    h: 0.29676,
+                    visible: false,
+                },
             ],
             eq_enabled: true,
             eq_gains: [0.0; EQ_BANDS],
+            spatial_x: 0.0,
+            spatial_y: 0.0,
+            room_size: 8.0,
+            reverb: 0.0,
             volume: 0.8,
             muted: false,
             liquid: GlassConfig::default(),
@@ -581,6 +600,7 @@ fn panel_key(index: usize) -> &'static str {
         3 => "layout.playlists",
         4 => "layout.equalizer",
         5 => "layout.visualizer",
+        6 => "layout.spatial_audio",
         _ => "layout.unknown",
     }
 }
@@ -699,6 +719,26 @@ pub fn load_from(path: &Path) -> Option<Config> {
             "eq_gains" => {
                 if let Some(gains) = parse_eq(value) {
                     ui.eq_gains = gains;
+                }
+            }
+            "ui_spatial_x" => {
+                if let Ok(parsed) = value.parse::<f32>() {
+                    ui.spatial_x = parsed.clamp(-1.0, 1.0);
+                }
+            }
+            "ui_spatial_y" => {
+                if let Ok(parsed) = value.parse::<f32>() {
+                    ui.spatial_y = parsed.clamp(-1.0, 1.0);
+                }
+            }
+            "ui_room_size" => {
+                if let Ok(parsed) = value.parse::<f32>() {
+                    ui.room_size = parsed.clamp(2.0, 24.0);
+                }
+            }
+            "ui_reverb" => {
+                if let Ok(parsed) = value.parse::<f32>() {
+                    ui.reverb = parsed.clamp(0.0, 1.0);
                 }
             }
             "volume" => {
@@ -840,6 +880,10 @@ pub fn save_to(path: &Path, config: &Config) {
          ui_background_dim={:.3}\n\
          eq_enabled={}\n\
          eq_gains={}\n\
+         ui_spatial_x={:.4}\n\
+         ui_spatial_y={:.4}\n\
+         ui_room_size={:.2}\n\
+         ui_reverb={:.3}\n\
          volume={:.3}\n\
          muted={}\n",
         config.library_root.display(),
@@ -882,6 +926,10 @@ pub fn save_to(path: &Path, config: &Config) {
             .map(|gain| format!("{gain:.2}"))
             .collect::<Vec<_>>()
             .join(","),
+        ui.spatial_x,
+        ui.spatial_y,
+        ui.room_size,
+        ui.reverb,
         ui.volume,
         if ui.muted { 1 } else { 0 },
     );

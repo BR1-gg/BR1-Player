@@ -21,6 +21,9 @@ independent components:
   scrolling with the mouse wheel either way.
 - **Equalizer** — a real 10-band peaking EQ with presets.
 - **Audio visualizer** — a live spectrum view (separate component, add it from the `+` menu).
+- **Spatial audio** — drag the speaker around the listener: its direction pans the
+  sound and its distance attenuates it. The room size (2–24 m) scales the space and
+  the reverb tail; the REVERB slider sets how wet the mix is. (Add it from the `+` menu.)
 
 Every panel can be moved and resized. Press the top-left `+` to open the **component
 menu**: it enters layout mode and lists every component with a tick. Click a component
