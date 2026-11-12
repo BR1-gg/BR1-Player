@@ -318,10 +318,10 @@ impl Manager {
                     let url = parent_url;
                     thread::spawn(move || {
                         let _ = std::fs::create_dir_all(root.join(&name));
-                        if !covers.is_empty() {
-                            if download::download_playlist_cover(&covers, &root, &name).is_ok() {
-                                return;
-                            }
+                        if !covers.is_empty()
+                            && download::download_playlist_cover(&covers, &root, &name).is_ok()
+                        {
+                            return;
                         }
                         if let Ok(handle) = download::yt_dlp_playlist_cover(&url, &root, &name) {
                             while handle.receiver.recv().is_ok() {}

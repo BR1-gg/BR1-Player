@@ -10,8 +10,9 @@ use egui::{
 };
 
 use crate::audio::{AudioEngine, EQ_FREQS};
-use crate::config::{self, Config, UiConfig, EQ_BANDS};
+use crate::config::{self, Config, GlassPreset, GlassShape, UiConfig, EQ_BANDS};
 use crate::download;
+use crate::glass::GlassSlot;
 use crate::library::{self, Track};
 use crate::queue::{self, JobState};
 use crate::theme::{self, Theme};
@@ -83,10 +84,24 @@ impl PanelKind {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettingsTab {
     Appearance,
+    Glass,
     Layout,
     Library,
     Downloads,
     About,
+}
+
+impl SettingsTab {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Appearance => "appearance",
+            Self::Glass => "glass",
+            Self::Layout => "layout",
+            Self::Library => "library",
+            Self::Downloads => "downloads",
+            Self::About => "about",
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -785,7 +800,9 @@ impl PlayerApp {
 
         child.add_space(12.0);
         child.horizontal(|ui| {
-            if ui::pill_button_sized(ui, 150.0, "Choose folder", true, &theme).clicked() {
+            if ui::pill_button_sized(ui, 150.0, "Choose folder", true, &theme, GlassSlot::Setup)
+                .clicked()
+            {
                 if let Some(folder) = rfd::FileDialog::new()
                     .set_title("Choose your music folder")
                     .pick_folder()
@@ -793,7 +810,9 @@ impl PlayerApp {
                     self.library_root = folder;
                 }
             }
-            if ui::pill_button_sized(ui, 132.0, "Use default", false, &theme).clicked() {
+            if ui::pill_button_sized(ui, 132.0, "Use default", false, &theme, GlassSlot::Setup)
+                .clicked()
+            {
                 self.library_root = config::default_library_root();
             }
         });
@@ -807,8 +826,15 @@ impl PlayerApp {
             .color(theme.faint()),
         );
         child.add_space(8.0);
-        if ui::pill_button_sized(&mut child, 210.0, "Start using Def Player", true, &theme)
-            .clicked()
+        if ui::pill_button_sized(
+            &mut child,
+            210.0,
+            "Start using Def Player",
+            true,
+            &theme,
+            GlassSlot::Setup,
+        )
+        .clicked()
         {
             self.finish_setup();
         }
@@ -1099,8 +1125,15 @@ impl PlayerApp {
         );
         self.search_rect = Some(search_rect);
 
-        let plus_response = ui::circle_button(ui, plus_rect, "add-music", Glyph::Plus, &theme)
-            .on_hover_text(if self.layout_edit {
+        let plus_response = ui::circle_button(
+            ui,
+            plus_rect,
+            "add-music",
+            Glyph::Plus,
+            &theme,
+            GlassSlot::TopBar,
+        )
+        .on_hover_text(if self.layout_edit {
                 "Add a hidden component"
             } else {
                 "Add music or a link"
@@ -1112,7 +1145,16 @@ impl PlayerApp {
         }
 
         if self.layout_edit {
-            theme::paint_pill(ui.painter(), search_rect, &theme, false, true, false);
+            theme::paint_pill(
+                ui.painter(),
+                search_rect,
+                &theme,
+                false,
+                false,
+                true,
+                false,
+                GlassSlot::TopBar,
+            );
             let layout_text = "LAYOUT MODE — drag to move · corner to resize";
             painter.text(
                 pos2(search_rect.left() + 18.0, search_rect.center().y),
@@ -1135,11 +1177,31 @@ impl PlayerApp {
                 pos2(search_rect.right() - 116.0, search_rect.center().y),
                 vec2(68.0, 26.0),
             );
-            if ui::chip(ui, reset, "layout-reset-top", "RESET", false, &theme).clicked() {
+            if ui::chip(
+                ui,
+                reset,
+                "layout-reset-top",
+                "RESET",
+                false,
+                &theme,
+                GlassSlot::TopBar,
+            )
+            .clicked()
+            {
                 self.config.ui.panels = UiConfig::default().panels;
                 self.save_config();
             }
-            if ui::chip(ui, done, "layout-done", "DONE", true, &theme).clicked() {
+            if ui::chip(
+                ui,
+                done,
+                "layout-done",
+                "DONE",
+                true,
+                &theme,
+                GlassSlot::TopBar,
+            )
+            .clicked()
+            {
                 self.layout_edit = false;
                 self.save_config();
             }
@@ -1156,6 +1218,8 @@ impl PlayerApp {
                 search_hovered,
                 false,
                 false,
+                false,
+                GlassSlot::TopBar,
             );
             ui::paint_glyph(
                 ui.painter(),
@@ -1197,7 +1261,16 @@ impl PlayerApp {
 
         self.mini_player(ui, mini_rect, &theme);
 
-        if ui::circle_button(ui, settings_rect, "settings-open", Glyph::Sliders, &theme).clicked() {
+        if ui::circle_button(
+            ui,
+            settings_rect,
+            "settings-open",
+            Glyph::Sliders,
+            &theme,
+            GlassSlot::TopBar,
+        )
+        .clicked()
+        {
             self.settings_open = true;
             self.add_menu_open = false;
         }
@@ -1289,7 +1362,17 @@ impl PlayerApp {
         } else {
             Glyph::Play
         };
-        if ui::glyph_button(ui, play_rect, "mini-play", glyph, true, theme).clicked() {
+        if ui::glyph_button(
+            ui,
+            play_rect,
+            "mini-play",
+            glyph,
+            true,
+            theme,
+            GlassSlot::Transport,
+        )
+        .clicked()
+        {
             self.toggle_play();
         }
     }
@@ -1434,7 +1517,7 @@ impl PlayerApp {
             pos2(head.left(), head.top() + 28.0),
             Align2::LEFT_CENTER,
             ui::ellipsize(
-                &painter,
+                painter,
                 &name,
                 &FontId::proportional(15.0),
                 theme.text(),
@@ -1486,21 +1569,30 @@ impl PlayerApp {
                     let row = rect.shrink2(vec2(2.0, 1.0));
                     let painter = ui.painter();
 
-                    if active {
-                        theme::gradient_rect(
-                            painter,
-                            row,
-                            9.0,
-                            theme::with_alpha(theme.accent_a, 54),
-                            theme::with_alpha(theme.accent_b, 22),
-                            theme.angle,
-                        );
-                    } else if response.hovered() {
-                        painter.rect_filled(
-                            row,
-                            9.0,
-                            Color32::from_rgba_unmultiplied(255, 255, 255, 12),
-                        );
+                    let glass = crate::glass::paint_row(
+                        painter,
+                        row,
+                        &theme,
+                        response.hovered(),
+                        active,
+                    );
+                    if !glass {
+                        if active {
+                            theme::gradient_rect(
+                                painter,
+                                row,
+                                9.0,
+                                theme::with_alpha(theme.accent_a, 54),
+                                theme::with_alpha(theme.accent_b, 22),
+                                theme.angle,
+                            );
+                        } else if response.hovered() {
+                            painter.rect_filled(
+                                row,
+                                9.0,
+                                Color32::from_rgba_unmultiplied(255, 255, 255, 12),
+                            );
+                        }
                     }
 
                     let cover = Rect::from_min_size(
@@ -1515,7 +1607,7 @@ impl PlayerApp {
                     let text_width = (row.right() - 8.0 - time_width - text_left).max(20.0);
                     let title_font = FontId::proportional(12.0);
                     let artist_font = FontId::proportional(10.5);
-                    let title_color = if active { theme.text() } else { theme.text() };
+                    let title_color = theme.text();
                     painter.text(
                         pos2(text_left, row.center().y - 8.0),
                         Align2::LEFT_CENTER,
@@ -1662,20 +1754,33 @@ impl PlayerApp {
                             FontId::proportional(10.5),
                             theme::with_alpha(theme.text(), 210),
                         );
-                        if is_active {
-                            ui.painter().rect_stroke(
-                                rect,
-                                12.0,
-                                Stroke::new(2.0_f32, theme.accent_b),
-                                StrokeKind::Inside,
-                            );
-                        } else if response.hovered() {
-                            ui.painter().rect_stroke(
-                                rect,
-                                12.0,
-                                Stroke::new(1.5_f32, theme::with_alpha(theme.accent_a, 120)),
-                                StrokeKind::Inside,
-                            );
+                        let glass_ring = crate::glass::paint_card_ring(
+                            ui.painter(),
+                            rect,
+                            12.0,
+                            &theme,
+                            response.hovered(),
+                            is_active,
+                        );
+                        if !glass_ring {
+                            if is_active {
+                                ui.painter().rect_stroke(
+                                    rect,
+                                    12.0,
+                                    Stroke::new(2.0_f32, theme.accent_b),
+                                    StrokeKind::Inside,
+                                );
+                            } else if response.hovered() {
+                                ui.painter().rect_stroke(
+                                    rect,
+                                    12.0,
+                                    Stroke::new(
+                                        1.5_f32,
+                                        theme::with_alpha(theme.accent_a, 120),
+                                    ),
+                                    StrokeKind::Inside,
+                                );
+                            }
                         }
 
                         if response.clicked() {
@@ -1873,13 +1978,43 @@ impl PlayerApp {
         } else {
             Glyph::Play
         };
-        if ui::glyph_button(ui, prev_rect, "player-prev", Glyph::Prev, false, &theme).clicked() {
+        if ui::glyph_button(
+            ui,
+            prev_rect,
+            "player-prev",
+            Glyph::Prev,
+            false,
+            &theme,
+            GlassSlot::Transport,
+        )
+        .clicked()
+        {
             self.previous();
         }
-        if ui::glyph_button(ui, play_rect, "player-play", glyph, true, &theme).clicked() {
+        if ui::glyph_button(
+            ui,
+            play_rect,
+            "player-play",
+            glyph,
+            true,
+            &theme,
+            GlassSlot::Transport,
+        )
+        .clicked()
+        {
             self.toggle_play();
         }
-        if ui::glyph_button(ui, next_rect, "player-next", Glyph::Next, false, &theme).clicked() {
+        if ui::glyph_button(
+            ui,
+            next_rect,
+            "player-next",
+            Glyph::Next,
+            false,
+            &theme,
+            GlassSlot::Transport,
+        )
+        .clicked()
+        {
             self.advance(1, false);
         }
 
@@ -1888,7 +2023,17 @@ impl PlayerApp {
                 Rect::from_center_size(pos2(left + 38.0, controls_y), vec2(76.0, 24.0));
             let repeat_rect =
                 Rect::from_center_size(pos2(left + 122.0, controls_y), vec2(82.0, 24.0));
-            if ui::chip(ui, shuffle_rect, "shuffle", "SHUFFLE", self.shuffle, &theme).clicked() {
+            if ui::chip(
+                ui,
+                shuffle_rect,
+                "shuffle",
+                "SHUFFLE",
+                self.shuffle,
+                &theme,
+                GlassSlot::PlayerChip,
+            )
+            .clicked()
+            {
                 self.shuffle = !self.shuffle;
             }
             let repeat_label = match self.repeat {
@@ -1903,6 +2048,7 @@ impl PlayerApp {
                 repeat_label,
                 self.repeat != Repeat::Off,
                 &theme,
+                GlassSlot::PlayerChip,
             )
             .clicked()
             {
@@ -1931,6 +2077,7 @@ impl PlayerApp {
                 },
                 false,
                 &theme,
+                GlassSlot::Transport,
             )
             .clicked()
             {
@@ -2025,13 +2172,41 @@ impl PlayerApp {
         }
 
         child.horizontal(|ui| {
-            if ui::chip_button(ui, "DOWNLOAD", true, 96.0, &theme).clicked() {
+            if ui::chip_button(
+                ui,
+                "DOWNLOAD",
+                true,
+                96.0,
+                &theme,
+                GlassSlot::DownloaderAction,
+            )
+            .clicked()
+            {
                 self.start_download();
             }
-            if active > 0 && ui::chip_button(ui, "CANCEL ALL", false, 92.0, &theme).clicked() {
+            if active > 0
+                && ui::chip_button(
+                    ui,
+                    "CANCEL ALL",
+                    false,
+                    92.0,
+                    &theme,
+                    GlassSlot::DownloaderAction,
+                )
+                .clicked()
+            {
                 self.manager.cancel_all();
             }
-            if ui::chip_button(ui, "CHANGE FOLDER", false, 110.0, &theme).clicked() {
+            if ui::chip_button(
+                ui,
+                "CHANGE FOLDER",
+                false,
+                110.0,
+                &theme,
+                GlassSlot::DownloaderAction,
+            )
+            .clicked()
+            {
                 self.choose_library_folder();
             }
         });
@@ -2059,7 +2234,16 @@ impl PlayerApp {
             );
             for quality in [128u16, 192, 256, 320] {
                 let current = self.manager.settings.quality == quality;
-                if ui::chip_button(ui, &format!("{quality}"), current, 40.0, &theme).clicked() {
+                if ui::chip_button(
+                    ui,
+                    &format!("{quality}"),
+                    current,
+                    40.0,
+                    &theme,
+                    GlassSlot::OptionChip,
+                )
+                .clicked()
+                {
                     quality_clicked = Some(quality);
                 }
             }
@@ -2073,7 +2257,16 @@ impl PlayerApp {
             );
             for parallel in [1usize, 2, 3, 4, 6] {
                 let current = self.manager.settings.parallel == parallel;
-                if ui::chip_button(ui, &parallel.to_string(), current, 24.0, &theme).clicked() {
+                if ui::chip_button(
+                    ui,
+                    &parallel.to_string(),
+                    current,
+                    24.0,
+                    &theme,
+                    GlassSlot::OptionChip,
+                )
+                .clicked()
+                {
                     parallel_clicked = Some(parallel);
                 }
             }
@@ -2138,10 +2331,29 @@ impl PlayerApp {
                 .color(theme.faint()),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if finished > 0 && ui::chip_button(ui, "CLEAR", false, 54.0, &theme).clicked() {
+                if finished > 0
+                    && ui::chip_button(
+                        ui,
+                        "CLEAR",
+                        false,
+                        54.0,
+                        &theme,
+                        GlassSlot::DownloaderAction,
+                    )
+                    .clicked()
+                {
                     self.manager.clear_finished();
                 }
-                if ui::chip_button(ui, "LOG", self.download_log_open, 44.0, &theme).clicked() {
+                if ui::chip_button(
+                    ui,
+                    "LOG",
+                    self.download_log_open,
+                    44.0,
+                    &theme,
+                    GlassSlot::DownloaderAction,
+                )
+                .clicked()
+                {
                     self.download_log_open = !self.download_log_open;
                 }
             });
@@ -2184,9 +2396,16 @@ impl PlayerApp {
                 .id_salt("download-jobs-scroll")
                 .show(&mut list, |ui| {
                     for (id, title, detail, state, progress) in &jobs {
-                        let (row, _) = ui
+                        let (row, response) = ui
                             .allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::hover());
                         let painter = ui.painter();
+                        crate::glass::paint_row(
+                            painter,
+                            row.shrink2(vec2(1.0, 1.0)),
+                            &theme,
+                            response.hovered(),
+                            false,
+                        );
                         let title_color = match state {
                             JobState::Failed => theme.danger(),
                             JobState::Done | JobState::Cancelled => theme.muted(),
@@ -2268,6 +2487,18 @@ impl PlayerApp {
                                 Id::new(("cancel-job", *id)),
                                 Sense::click(),
                             );
+                            if response.hovered() {
+                                crate::glass::paint_button(
+                                    ui.painter(),
+                                    cancel_rect,
+                                    &theme,
+                                    true,
+                                    response.is_pointer_button_down_on(),
+                                    false,
+                                    false,
+                                    GlassSlot::DownloaderAction,
+                                );
+                            }
                             ui::paint_glyph(
                                 ui.painter(),
                                 cancel_rect.center(),
@@ -2367,6 +2598,7 @@ impl PlayerApp {
             },
             self.config.ui.eq_enabled,
             &theme,
+            GlassSlot::OptionChip,
         )
         .clicked()
         {
@@ -2383,6 +2615,7 @@ impl PlayerApp {
             "EQ",
             self.eq_mode == EqMode::Equalizer,
             &theme,
+            GlassSlot::OptionChip,
         )
         .clicked()
         {
@@ -2395,6 +2628,7 @@ impl PlayerApp {
             "BARS",
             self.eq_mode == EqMode::Visualizer,
             &theme,
+            GlassSlot::OptionChip,
         )
         .clicked()
         {
@@ -2421,7 +2655,16 @@ impl PlayerApp {
                     ),
                     ("CLUB", [4.0, 4.0, 2.0, 0.0, 0.0, 1.0, 2.0, 3.0, 2.0, 1.0]),
                 ] {
-                    if ui::chip_button(ui, label, false, 50.0, &theme).clicked() {
+                    if ui::chip_button(
+                        ui,
+                        label,
+                        false,
+                        50.0,
+                        &theme,
+                        GlassSlot::OptionChip,
+                    )
+                    .clicked()
+                    {
                         preset = Some(gains);
                     }
                 }
@@ -2491,7 +2734,16 @@ impl PlayerApp {
                 },
                 theme.angle,
             );
-            painter.circle_filled(pos2(x, knob_y), 4.5, theme.text());
+            if !crate::glass::paint_orb(
+                painter,
+                pos2(x, knob_y),
+                5.0,
+                &theme,
+                response.hovered() || response.dragged(),
+                response.dragged(),
+            ) {
+                painter.circle_filled(pos2(x, knob_y), 4.5, theme.text());
+            }
             if response.hovered() || response.dragged() {
                 painter.circle_stroke(
                     pos2(x, knob_y),
@@ -2624,7 +2876,16 @@ impl PlayerApp {
                 pos2(rect.left() + 8.0, rect.top() + 8.0)
             };
             let label = Rect::from_min_size(label_pos, vec2(label_width, label_height));
-            theme::paint_pill(ui.painter(), label, &theme, false, false, false);
+            theme::paint_pill(
+                ui.painter(),
+                label,
+                &theme,
+                false,
+                false,
+                false,
+                false,
+                GlassSlot::None,
+            );
             let label_font = FontId::proportional(10.0);
             ui.painter().text(
                 pos2(label.left() + 9.0, label.center().y),
@@ -2791,7 +3052,16 @@ impl PlayerApp {
             pos2(frame.right() - width - 18.0, frame.bottom() - 42.0),
             vec2(width, 28.0),
         );
-        theme::paint_pill(ui.painter(), rect, &theme, false, false, false);
+        theme::paint_pill(
+            ui.painter(),
+            rect,
+            &theme,
+            false,
+            false,
+            false,
+            false,
+            GlassSlot::None,
+        );
         let color = if self.status_error {
             theme.danger()
         } else {
@@ -2837,9 +3107,14 @@ impl PlayerApp {
                         .max_rect(Rect::from_min_size(self.add_menu_pos, vec2(260.0, 220.0)))
                         .id_salt("add-menu-card"),
                 );
+                let menu_glass = crate::glass::enabled(&theme, GlassSlot::Menu);
                 let menu = egui::Frame::NONE
-                    .fill(theme.panel_top())
-                    .stroke(Stroke::new(1.0_f32, theme.accent_line()))
+                    .fill(crate::glass::menu_fill(&theme).unwrap_or_else(|| theme.panel_top()))
+                    .stroke(if menu_glass {
+                        Stroke::NONE
+                    } else {
+                        Stroke::new(1.0_f32, theme.accent_line())
+                    })
                     .corner_radius(CornerRadius::from(12.0))
                     .inner_margin(egui::Margin::symmetric(6, 6))
                     .show(&mut menu_ui, |ui| {
@@ -2897,6 +3172,12 @@ impl PlayerApp {
                             }
                         }
                     });
+                crate::glass::paint_menu_rim(
+                    menu_ui.painter(),
+                    menu.response.rect,
+                    12.0,
+                    &theme,
+                );
                 self.add_menu_rect = menu.response.rect;
 
                 let outside_click = ui.ctx().input(|input| input.pointer.any_click())
@@ -2990,9 +3271,13 @@ impl PlayerApp {
             .order(egui::Order::Foreground)
             .fixed_pos(popup.min)
             .show(ctx, |ui| {
-                egui::Frame::NONE
-                    .fill(theme.panel_top())
-                    .stroke(Stroke::new(1.0_f32, theme.accent_line()))
+                let popup_frame = egui::Frame::NONE
+                    .fill(crate::glass::menu_fill(&theme).unwrap_or_else(|| theme.panel_top()))
+                    .stroke(if crate::glass::enabled(&theme, GlassSlot::Menu) {
+                        Stroke::NONE
+                    } else {
+                        Stroke::new(1.0_f32, theme.accent_line())
+                    })
                     .corner_radius(CornerRadius::from(12.0))
                     .inner_margin(egui::Margin::symmetric(8, 8))
                     .show(ui, |ui| {
@@ -3013,7 +3298,14 @@ impl PlayerApp {
                                     vec2(ui.available_width(), 36.0),
                                     Sense::click(),
                                 );
-                                if response.hovered() {
+                                if !crate::glass::paint_row(
+                                    ui.painter(),
+                                    row.shrink2(vec2(1.0, 1.0)),
+                                    &theme,
+                                    response.hovered(),
+                                    false,
+                                ) && response.hovered()
+                                {
                                     ui.painter().rect_filled(
                                         row,
                                         8.0,
@@ -3072,7 +3364,14 @@ impl PlayerApp {
                                     vec2(ui.available_width(), 32.0),
                                     Sense::click(),
                                 );
-                                if response.hovered() {
+                                if !crate::glass::paint_row(
+                                    ui.painter(),
+                                    row.shrink2(vec2(1.0, 1.0)),
+                                    &theme,
+                                    response.hovered(),
+                                    false,
+                                ) && response.hovered()
+                                {
                                     ui.painter().rect_filled(
                                         row,
                                         8.0,
@@ -3105,6 +3404,12 @@ impl PlayerApp {
                             }
                         }
                     });
+                crate::glass::paint_menu_rim(
+                    ui.painter(),
+                    popup_frame.response.rect,
+                    12.0,
+                    &theme,
+                );
             });
         self.search_popup_rect = area.response.rect;
 
@@ -3163,6 +3468,13 @@ impl PlayerApp {
                 let mut modal_ui =
                     ui.new_child(UiBuilder::new().max_rect(modal).id_salt("settings-card"));
                 modal_ui.set_clip_rect(modal.expand(4.0));
+                // A glass modal sits over a busy dashboard; keep its base dark
+                // enough that the controls stay legible through the face.
+                modal_ui.painter().rect_filled(
+                    modal,
+                    20.0,
+                    Color32::from_rgba_unmultiplied(8, 8, 12, 240),
+                );
                 theme::paint_card(modal_ui.painter(), modal, 20.0, &theme, false, false);
                 let modal_border = if theme.panel_border_visible {
                     theme.panel_border_width.max(0.0)
@@ -3197,6 +3509,7 @@ impl PlayerApp {
                     &theme,
                     close_response.hovered(),
                     false,
+                    GlassSlot::SettingsControl,
                 );
                 ui::paint_glyph(
                     child.painter(),
@@ -3209,9 +3522,10 @@ impl PlayerApp {
                     close = true;
                 }
 
-                child.horizontal(|ui| {
+                child.horizontal_wrapped(|ui| {
                     for (tab, label) in [
                         (SettingsTab::Appearance, "APPEARANCE"),
+                        (SettingsTab::Glass, "GLASS"),
                         (SettingsTab::Layout, "LAYOUT"),
                         (SettingsTab::Library, "LIBRARY"),
                         (SettingsTab::Downloads, "DOWNLOADS"),
@@ -3223,6 +3537,7 @@ impl PlayerApp {
                             self.settings_tab == tab,
                             label.len() as f32 * 6.2 + 18.0,
                             &theme,
+                            GlassSlot::SettingsControl,
                         )
                         .clicked()
                         {
@@ -3236,12 +3551,15 @@ impl PlayerApp {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .max_height(body_height)
-                    .id_salt("settings-body")
+                    .id_salt(("settings-body", self.settings_tab.key()))
                     .show(&mut child, |ui| {
                         ui.set_min_width(ui.available_width());
                         match self.settings_tab {
                             SettingsTab::Appearance => {
                                 self.appearance_settings(ui, &theme);
+                            }
+                            SettingsTab::Glass => {
+                                self.glass_settings(ui, &theme);
                             }
                             SettingsTab::Layout => {
                                 self.layout_settings(ui, &theme, &mut action);
@@ -3280,6 +3598,37 @@ impl PlayerApp {
     }
 
     fn appearance_settings(&mut self, ui: &mut Ui, theme: &Theme) {
+        Self::settings_heading(
+            ui,
+            theme,
+            "LIQUID GLASS",
+            "Apple-style glass for the selected components. The GLASS tab exposes every material, tone, shape and accessibility setting.",
+        );
+        let mut glass_enabled = self.config.ui.liquid.enabled;
+        let mut open_glass = false;
+        ui.horizontal(|ui| {
+            if ui.checkbox(&mut glass_enabled, "Enable Liquid Glass mode").changed() {
+                self.config.ui.liquid.enabled = glass_enabled;
+                self.refresh_theme(ui.ctx());
+                self.save_config();
+            }
+            if ui::chip_button(
+                ui,
+                "OPEN GLASS SETTINGS",
+                false,
+                158.0,
+                theme,
+                GlassSlot::SettingsControl,
+            )
+            .clicked()
+            {
+                open_glass = true;
+            }
+        });
+        if open_glass {
+            self.settings_tab = SettingsTab::Glass;
+        }
+
         Self::settings_heading(
             ui,
             theme,
@@ -3354,7 +3703,16 @@ impl PlayerApp {
                     [12, 10, 26],
                 ),
             ] {
-                if ui::chip_button(ui, name, false, 64.0, theme).clicked() {
+                if ui::chip_button(
+                    ui,
+                    name,
+                    false,
+                    64.0,
+                    theme,
+                    GlassSlot::SettingsControl,
+                )
+                .clicked()
+                {
                     preset = Some((a, b, angle, frame, bg));
                 }
             }
@@ -3511,10 +3869,28 @@ impl PlayerApp {
             }
         });
         ui.horizontal(|ui| {
-            if ui::chip_button(ui, "CHOOSE PHOTO", false, 112.0, theme).clicked() {
+            if ui::chip_button(
+                ui,
+                "CHOOSE PHOTO",
+                false,
+                112.0,
+                theme,
+                GlassSlot::SettingsControl,
+            )
+            .clicked()
+            {
                 self.choose_background();
             }
-            if ui::chip_button(ui, "CLEAR", false, 60.0, theme).clicked() {
+            if ui::chip_button(
+                ui,
+                "CLEAR",
+                false,
+                60.0,
+                theme,
+                GlassSlot::SettingsControl,
+            )
+            .clicked()
+            {
                 self.config.ui.background_image = None;
                 self.background_loaded = None;
                 self.background_tex = None;
@@ -3559,7 +3935,16 @@ impl PlayerApp {
         }
 
         ui.add_space(8.0);
-        if ui::chip_button(ui, "RESTORE APPEARANCE DEFAULTS", false, 210.0, theme).clicked() {
+        if ui::chip_button(
+            ui,
+            "RESTORE APPEARANCE DEFAULTS",
+            false,
+            210.0,
+            theme,
+            GlassSlot::SettingsControl,
+        )
+        .clicked()
+        {
             let defaults = UiConfig::default();
             self.config.ui.accent_a = defaults.accent_a;
             self.config.ui.accent_b = defaults.accent_b;
@@ -3625,7 +4010,16 @@ impl PlayerApp {
             pos2(inner.left() + 66.0, inner.top() + 48.0),
             vec2(92.0, 24.0),
         );
-        theme::paint_pill(ui.painter(), pill, &self.theme, false, false, true);
+        theme::paint_pill(
+            ui.painter(),
+            pill,
+            &self.theme,
+            false,
+            false,
+            false,
+            true,
+            GlassSlot::SettingsControl,
+        );
         ui.painter().text(
             pill.center(),
             Align2::CENTER_CENTER,
@@ -3633,6 +4027,209 @@ impl PlayerApp {
             FontId::proportional(9.0),
             self.theme.on_accent(),
         );
+    }
+
+    fn glass_settings(&mut self, ui: &mut Ui, theme: &Theme) {
+        let mut glass = self.config.ui.liquid;
+        let mut changed = false;
+
+        Self::settings_heading(
+            ui,
+            theme,
+            "LIQUID GLASS",
+            "All knobs from liquid-rust's Material, Tone, Shadow and Appearance models. Values resolve exactly like the library: size adaptation, the iOS 27 transparency slider, Reduce Transparency and Increase Contrast.",
+        );
+        changed |= ui
+            .checkbox(&mut glass.enabled, "Enable Liquid Glass mode")
+            .changed();
+
+        ui.horizontal_wrapped(|ui| {
+            for preset in [
+                GlassPreset::Regular,
+                GlassPreset::Clear,
+                GlassPreset::ClearBar,
+                GlassPreset::Tinted,
+                GlassPreset::Identity,
+            ] {
+                if ui::chip_button(
+                    ui,
+                    preset.label(),
+                    false,
+                    76.0,
+                    theme,
+                    GlassSlot::SettingsControl,
+                )
+                .clicked()
+                {
+                    glass.apply_preset(preset);
+                    changed = true;
+                }
+            }
+        });
+        ui.label(
+            egui::RichText::new(
+                "Presets change only the material. Targets, appearance, shape and scene stay as they are.",
+            )
+            .size(9.5)
+            .color(theme.faint()),
+        );
+
+        egui::CollapsingHeader::new("TARGETS")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new(
+                        "Choose which components receive the glass surface. Slider mode paints only the ball.",
+                    )
+                    .size(9.5)
+                    .color(theme.faint()),
+                );
+                glass_check(ui, "Top bar (+, settings, search pill)", &mut glass.targets.top_bar, &mut changed);
+                glass_check(ui, "Transport (prev / play / next / mute)", &mut glass.targets.transport, &mut changed);
+                glass_check(ui, "Player chips (shuffle / repeat)", &mut glass.targets.player_chips, &mut changed);
+                glass_check(ui, "Downloader actions", &mut glass.targets.downloader_actions, &mut changed);
+                glass_check(ui, "Option chips (quality, parallel, EQ)", &mut glass.targets.option_chips, &mut changed);
+                glass_check(ui, "Menus and popups", &mut glass.targets.menus, &mut changed);
+                glass_check(ui, "Lists and cards", &mut glass.targets.lists, &mut changed);
+                glass_check(ui, "Slider balls only", &mut glass.targets.sliders, &mut changed);
+                glass_check(ui, "Panels and modals", &mut glass.targets.panels, &mut changed);
+                glass_check(ui, "Settings controls", &mut glass.targets.settings_controls, &mut changed);
+                glass_check(ui, "Setup screen", &mut glass.targets.setup, &mut changed);
+            });
+
+        egui::CollapsingHeader::new("MATERIAL")
+            .default_open(true)
+            .show(ui, |ui| {
+                glass_slider(ui, "Refraction (bevel strength)", &mut glass.refraction, 0.0..=1.0, &mut changed);
+                glass_slider(ui, "Depth (bevel width, pt)", &mut glass.depth, 0.0..=80.0, &mut changed);
+                glass_slider(ui, "Dispersion (chromatic split)", &mut glass.dispersion, 0.0..=1.0, &mut changed);
+                glass_slider(ui, "Frost (blur radius, pt)", &mut glass.frost, 0.0..=60.0, &mut changed);
+                glass_slider(ui, "Splay (rim spread)", &mut glass.splay, 0.0..=1.0, &mut changed);
+                glass_slider(ui, "Specular (rim light)", &mut glass.specular, 0.0..=1.0, &mut changed);
+                glass_slider(ui, "Rim (bright inner edge)", &mut glass.rim, 0.0..=1.0, &mut changed);
+                glass_slider(ui, "Rim shade (soft inner shade)", &mut glass.rim_shade, 0.0..=1.0, &mut changed);
+                glass_slider(ui, "Hairline (1.25 pt chrome)", &mut glass.hairline, 0.0..=1.0, &mut changed);
+                glass_slider(ui, "Edge (dark outer line)", &mut glass.edge, 0.0..=1.0, &mut changed);
+                glass_slider(ui, "Dim (local backdrop dimming)", &mut glass.dim, 0.0..=1.0, &mut changed);
+                glass_check(ui, "Adaptive (large glass gets thicker)", &mut glass.adaptive, &mut changed);
+                ui.separator();
+                glass_check(ui, "Tint (stained glass)", &mut glass.tint_enabled, &mut changed);
+                if glass.tint_enabled {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("Tint colour")
+                                .size(11.0)
+                                .color(theme.muted()),
+                        );
+                        changed |= ui
+                            .color_edit_button_srgb(&mut glass.tint_color)
+                            .changed();
+                    });
+                    glass_slider(ui, "Tint strength", &mut glass.tint_strength, 0.0..=1.0, &mut changed);
+                }
+            });
+
+        egui::CollapsingHeader::new("SHADOW")
+            .default_open(false)
+            .show(ui, |ui| {
+                glass_slider(ui, "Offset Y (pt)", &mut glass.shadow.offset_y, -30.0..=40.0, &mut changed);
+                glass_slider(ui, "Blur (pt)", &mut glass.shadow.blur, 0.0..=100.0, &mut changed);
+                glass_slider(ui, "Opacity", &mut glass.shadow.opacity, 0.0..=1.0, &mut changed);
+            });
+
+        egui::CollapsingHeader::new("LIGHT FACE TONE")
+            .default_open(false)
+            .show(ui, |ui| {
+                glass_slider(ui, "Lift (LINEAR_DODGE)", &mut glass.light_tone.lift, 0.0..=0.5, &mut changed);
+                glass_slider(ui, "Luminance target", &mut glass.light_tone.luminance, 0.0..=1.0, &mut changed);
+                glass_slider(ui, "Luminance mix", &mut glass.light_tone.luminance_mix, 0.0..=1.0, &mut changed);
+                glass_slider(ui, "Lighten", &mut glass.light_tone.lighten, 0.0..=1.0, &mut changed);
+                glass_slider(ui, "Darken to", &mut glass.light_tone.darken_to, 0.0..=1.0, &mut changed);
+                glass_slider(ui, "Darken", &mut glass.light_tone.darken, 0.0..=1.0, &mut changed);
+            });
+
+        egui::CollapsingHeader::new("DARK FACE TONE")
+            .default_open(false)
+            .show(ui, |ui| {
+                glass_slider(ui, "Lift (LINEAR_DODGE)", &mut glass.dark_tone.lift, 0.0..=0.5, &mut changed);
+                glass_slider(ui, "Luminance target", &mut glass.dark_tone.luminance, 0.0..=1.0, &mut changed);
+                glass_slider(ui, "Luminance mix", &mut glass.dark_tone.luminance_mix, 0.0..=1.0, &mut changed);
+                glass_slider(ui, "Lighten", &mut glass.dark_tone.lighten, 0.0..=1.0, &mut changed);
+                glass_slider(ui, "Darken to", &mut glass.dark_tone.darken_to, 0.0..=1.0, &mut changed);
+                glass_slider(ui, "Darken", &mut glass.dark_tone.darken, 0.0..=1.0, &mut changed);
+            });
+
+        egui::CollapsingHeader::new("APPEARANCE")
+            .default_open(true)
+            .show(ui, |ui| {
+                glass_check(ui, "Dark colour scheme", &mut glass.dark, &mut changed);
+                glass_slider(ui, "Transparency (0 clear · 0.5 default · 1 tinted)", &mut glass.transparency, 0.0..=1.0, &mut changed);
+                glass_check(ui, "Reduce Transparency", &mut glass.reduce_transparency, &mut changed);
+                glass_check(ui, "Increase Contrast", &mut glass.increase_contrast, &mut changed);
+                glass_check(ui, "Reduce Motion", &mut glass.reduce_motion, &mut changed);
+                glass_check(ui, "Adapt to content", &mut glass.adapt_to_content, &mut changed);
+            });
+
+        egui::CollapsingHeader::new("SCENE & SHAPE")
+            .default_open(false)
+            .show(ui, |ui| {
+                glass_check(ui, "Physics (hover and press motion)", &mut glass.physics, &mut changed);
+                glass_check(ui, "Glass on glass", &mut glass.glass_on_glass, &mut changed);
+                glass_slider(ui, "Light angle (0 = top, clockwise)", &mut glass.light_angle, 0.0..=360.0, &mut changed);
+                glass_slider(ui, "Merge distance (reserved for grouped glass)", &mut glass.merge_spacing, 0.0..=60.0, &mut changed);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new("Button outline")
+                            .size(11.0)
+                            .color(theme.muted()),
+                    );
+                    let before = glass.shape;
+                    egui::ComboBox::from_id_salt("glass-shape")
+                        .selected_text(glass.shape.label())
+                        .show_ui(ui, |ui| {
+                            for shape in [
+                                GlassShape::Capsule,
+                                GlassShape::Rounded,
+                                GlassShape::Circular,
+                                GlassShape::Smooth,
+                            ] {
+                                ui.selectable_value(&mut glass.shape, shape, shape.label());
+                            }
+                        });
+                    changed |= glass.shape != before;
+                });
+                glass_slider(ui, "Shape radius (Rounded / Smooth)", &mut glass.shape_radius, 0.0..=80.0, &mut changed);
+                glass_slider(ui, "Smoothing (0 circular · 0.6 iOS)", &mut glass.smoothing, 0.0..=1.0, &mut changed);
+                ui.label(
+                    egui::RichText::new(
+                        "The outline applies to buttons, chips and icon buttons. Panels follow the Appearance corner radius.",
+                    )
+                    .size(9.5)
+                    .color(theme.faint()),
+                );
+            });
+
+        ui.add_space(8.0);
+        if ui::chip_button(
+            ui,
+            "RESTORE LIQUID GLASS DEFAULTS",
+            false,
+            232.0,
+            theme,
+            GlassSlot::SettingsControl,
+        )
+        .clicked()
+        {
+            glass = crate::config::GlassConfig::default();
+            changed = true;
+        }
+
+        if changed {
+            self.config.ui.liquid = glass;
+            self.refresh_theme(ui.ctx());
+            self.save_config();
+        }
     }
 
     fn layout_settings(&mut self, ui: &mut Ui, theme: &Theme, action: &mut Option<SettingsAction>) {
@@ -3682,8 +4279,10 @@ impl PlayerApp {
                 toggle,
                 theme,
                 response.hovered(),
+                false,
                 panel.visible,
                 false,
+                GlassSlot::SettingsControl,
             );
             ui.painter()
                 .circle_filled(pos2(knob_x, toggle.center().y), 6.0, theme.text());
@@ -3695,10 +4294,28 @@ impl PlayerApp {
 
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            if ui::pill_button_sized(ui, 150.0, "Edit layout", true, theme).clicked() {
+            if ui::pill_button_sized(
+                ui,
+                150.0,
+                "Edit layout",
+                true,
+                theme,
+                GlassSlot::SettingsControl,
+            )
+            .clicked()
+            {
                 *action = Some(SettingsAction::EditLayout);
             }
-            if ui::pill_button_sized(ui, 120.0, "Reset layout", false, theme).clicked() {
+            if ui::pill_button_sized(
+                ui,
+                120.0,
+                "Reset layout",
+                false,
+                theme,
+                GlassSlot::SettingsControl,
+            )
+            .clicked()
+            {
                 *action = Some(SettingsAction::ResetLayout);
             }
         });
@@ -3755,13 +4372,40 @@ impl PlayerApp {
         );
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            if ui::pill_button_sized(ui, 130.0, "Change folder", true, theme).clicked() {
+            if ui::pill_button_sized(
+                ui,
+                130.0,
+                "Change folder",
+                true,
+                theme,
+                GlassSlot::SettingsControl,
+            )
+            .clicked()
+            {
                 *action = Some(SettingsAction::ChooseFolder);
             }
-            if ui::pill_button_sized(ui, 110.0, "Add files", false, theme).clicked() {
+            if ui::pill_button_sized(
+                ui,
+                110.0,
+                "Add files",
+                false,
+                theme,
+                GlassSlot::SettingsControl,
+            )
+            .clicked()
+            {
                 *action = Some(SettingsAction::AddFiles);
             }
-            if ui::pill_button_sized(ui, 110.0, "Add folder", false, theme).clicked() {
+            if ui::pill_button_sized(
+                ui,
+                110.0,
+                "Add folder",
+                false,
+                theme,
+                GlassSlot::SettingsControl,
+            )
+            .clicked()
+            {
                 *action = Some(SettingsAction::AddFolder);
             }
         });
@@ -3786,7 +4430,16 @@ impl PlayerApp {
         ui.horizontal_wrapped(|ui| {
             for quality in [128u16, 192, 256, 320] {
                 let active = self.manager.settings.quality == quality;
-                if ui::chip_button(ui, &format!("{quality} kbps"), active, 84.0, theme).clicked() {
+                if ui::chip_button(
+                    ui,
+                    &format!("{quality} kbps"),
+                    active,
+                    84.0,
+                    theme,
+                    GlassSlot::SettingsControl,
+                )
+                .clicked()
+                {
                     self.set_quality(quality);
                 }
             }
@@ -3801,7 +4454,16 @@ impl PlayerApp {
         ui.horizontal_wrapped(|ui| {
             for parallel in [1usize, 2, 3, 4, 6] {
                 let active = self.manager.settings.parallel == parallel;
-                if ui::chip_button(ui, &parallel.to_string(), active, 34.0, theme).clicked() {
+                if ui::chip_button(
+                    ui,
+                    &parallel.to_string(),
+                    active,
+                    34.0,
+                    theme,
+                    GlassSlot::SettingsControl,
+                )
+                .clicked()
+                {
                     self.set_parallel(parallel);
                 }
             }
@@ -3817,7 +4479,16 @@ impl PlayerApp {
             .color(if tools.is_some() { theme.muted() } else { theme.danger() }),
         );
         ui.add_space(6.0);
-        if ui::pill_button_sized(ui, 130.0, "Change folder", false, theme).clicked() {
+        if ui::pill_button_sized(
+            ui,
+            130.0,
+            "Change folder",
+            false,
+            theme,
+            GlassSlot::SettingsControl,
+        )
+        .clicked()
+        {
             self.choose_library_folder();
         }
         ui.add_space(8.0);
@@ -3972,6 +4643,27 @@ impl eframe::App for PlayerApp {
 const LAYOUT_SAFE_PAD: f32 = 6.0;
 const LAYOUT_SNAP: f32 = 7.0;
 const LAYOUT_GRID: f32 = 8.0;
+
+fn glass_slider(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    changed: &mut bool,
+) {
+    if ui
+        .add(egui::Slider::new(value, range).text(label))
+        .changed()
+    {
+        *changed = true;
+    }
+}
+
+fn glass_check(ui: &mut Ui, label: &str, value: &mut bool, changed: &mut bool) {
+    if ui.checkbox(value, label).changed() {
+        *changed = true;
+    }
+}
 
 fn snap_targets(others: &[Rect], content: Rect) -> (Vec<f32>, Vec<f32>) {
     let safe = content.shrink(LAYOUT_SAFE_PAD);

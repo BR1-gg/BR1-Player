@@ -4,6 +4,7 @@ mod app;
 mod audio;
 mod config;
 mod download;
+mod glass;
 mod library;
 mod queue;
 mod theme;

@@ -3,6 +3,7 @@ use eframe::egui::{
     Sense, Shape, Stroke, TextureHandle, Ui,
 };
 
+use crate::glass::GlassSlot;
 use crate::theme::{self, with_alpha, Theme};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -296,31 +297,45 @@ pub fn glyph_button(
     glyph: Glyph,
     filled: bool,
     theme: &Theme,
+    slot: GlassSlot,
 ) -> Response {
     let response = ui
         .interact(rect, ui.id().with(id), Sense::click())
         .on_hover_cursor(CursorIcon::PointingHand);
     let painter = ui.painter();
 
-    let background = if filled {
-        if response.hovered() {
-            theme::lerp_color(theme.accent_a, Color32::WHITE, 0.14)
-        } else {
-            theme.accent_a
-        }
-    } else if response.hovered() {
-        Color32::from_rgba_unmultiplied(255, 255, 255, 20)
-    } else {
-        Color32::TRANSPARENT
-    };
+    let glass = crate::glass::paint_button(
+        painter,
+        rect,
+        theme,
+        response.hovered(),
+        response.is_pointer_button_down_on(),
+        false,
+        filled,
+        slot,
+    );
 
-    painter.circle_filled(rect.center(), rect.width() * 0.5, background);
-    if filled {
-        painter.circle_stroke(
-            rect.center(),
-            rect.width() * 0.5,
-            Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 60)),
-        );
+    if !glass {
+        let background = if filled {
+            if response.hovered() {
+                theme::lerp_color(theme.accent_a, Color32::WHITE, 0.14)
+            } else {
+                theme.accent_a
+            }
+        } else if response.hovered() {
+            Color32::from_rgba_unmultiplied(255, 255, 255, 20)
+        } else {
+            Color32::TRANSPARENT
+        };
+
+        painter.circle_filled(rect.center(), rect.width() * 0.5, background);
+        if filled {
+            painter.circle_stroke(
+                rect.center(),
+                rect.width() * 0.5,
+                Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 60)),
+            );
+        }
     }
     paint_glyph(
         painter,
@@ -337,11 +352,25 @@ pub fn glyph_button(
     response
 }
 
-pub fn circle_button(ui: &Ui, rect: Rect, id: &str, glyph: Glyph, theme: &Theme) -> Response {
+pub fn circle_button(
+    ui: &Ui,
+    rect: Rect,
+    id: &str,
+    glyph: Glyph,
+    theme: &Theme,
+    slot: GlassSlot,
+) -> Response {
     let response = ui
         .interact(rect, ui.id().with(id), Sense::click())
         .on_hover_cursor(CursorIcon::PointingHand);
-    theme::paint_icon_button(ui.painter(), rect, theme, response.hovered(), false);
+    theme::paint_icon_button(
+        ui.painter(),
+        rect,
+        theme,
+        response.hovered(),
+        false,
+        slot,
+    );
     paint_glyph(
         ui.painter(),
         rect.center(),
@@ -358,10 +387,20 @@ pub fn pill_button_sized(
     label: &str,
     primary: bool,
     theme: &Theme,
+    slot: GlassSlot,
 ) -> Response {
     let (rect, response) = ui.allocate_exact_size(vec2(width, 38.0), Sense::click());
     let painter = ui.painter();
-    theme::paint_pill(painter, rect, theme, response.hovered(), false, primary);
+    theme::paint_pill(
+        painter,
+        rect,
+        theme,
+        response.hovered(),
+        response.is_pointer_button_down_on(),
+        false,
+        primary,
+        slot,
+    );
     painter.text(
         rect.center(),
         Align2::CENTER_CENTER,
@@ -376,10 +415,26 @@ pub fn pill_button_sized(
     response.on_hover_cursor(CursorIcon::PointingHand)
 }
 
-pub fn chip_button(ui: &mut Ui, label: &str, active: bool, width: f32, theme: &Theme) -> Response {
+pub fn chip_button(
+    ui: &mut Ui,
+    label: &str,
+    active: bool,
+    width: f32,
+    theme: &Theme,
+    slot: GlassSlot,
+) -> Response {
     let (rect, response) = ui.allocate_exact_size(vec2(width, 26.0), Sense::click());
     let painter = ui.painter();
-    theme::paint_pill(painter, rect, theme, response.hovered(), active, false);
+    theme::paint_pill(
+        painter,
+        rect,
+        theme,
+        response.hovered(),
+        response.is_pointer_button_down_on(),
+        active,
+        false,
+        slot,
+    );
     painter.text(
         rect.center(),
         Align2::CENTER_CENTER,
@@ -390,12 +445,29 @@ pub fn chip_button(ui: &mut Ui, label: &str, active: bool, width: f32, theme: &T
     response.on_hover_cursor(CursorIcon::PointingHand)
 }
 
-pub fn chip(ui: &Ui, rect: Rect, id: &str, label: &str, active: bool, theme: &Theme) -> Response {
+pub fn chip(
+    ui: &Ui,
+    rect: Rect,
+    id: &str,
+    label: &str,
+    active: bool,
+    theme: &Theme,
+    slot: GlassSlot,
+) -> Response {
     let response = ui
         .interact(rect, ui.id().with(id), Sense::click())
         .on_hover_cursor(CursorIcon::PointingHand);
     let painter = ui.painter();
-    theme::paint_pill(painter, rect, theme, response.hovered(), active, false);
+    theme::paint_pill(
+        painter,
+        rect,
+        theme,
+        response.hovered(),
+        response.is_pointer_button_down_on(),
+        active,
+        false,
+        slot,
+    );
     painter.text(
         rect.center(),
         Align2::CENTER_CENTER,
@@ -445,7 +517,17 @@ pub fn slider(
     );
 
     if enabled && (response.hovered() || response.dragged()) {
-        painter.circle_filled(pos2(filled.right(), track.center().y), 5.5, Color32::WHITE);
+        let knob = pos2(filled.right(), track.center().y);
+        if !crate::glass::paint_orb(
+            painter,
+            knob,
+            5.5,
+            theme,
+            response.hovered(),
+            response.dragged(),
+        ) {
+            painter.circle_filled(knob, 5.5, Color32::WHITE);
+        }
     }
 
     let mut requested = None;
@@ -486,7 +568,7 @@ pub fn ellipsize(
     let mut high = chars.len();
 
     while low < high {
-        let mid = (low + high + 1) / 2;
+        let mid = (low + high).div_ceil(2);
         let mut candidate: String = chars[..mid].iter().collect();
         candidate.push('…');
 
@@ -558,11 +640,23 @@ pub fn menu_item(ui: &mut Ui, label: &str, glyph: Glyph, theme: &Theme) -> Respo
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 38.0), Sense::click());
     let painter = ui.painter();
     if response.hovered() {
-        painter.rect_filled(
-            rect,
-            CornerRadius::from(9.0),
-            Color32::from_rgba_unmultiplied(255, 255, 255, 18),
+        let glass = crate::glass::paint_button(
+            painter,
+            rect.shrink2(vec2(2.0, 1.0)),
+            theme,
+            true,
+            false,
+            false,
+            false,
+            GlassSlot::Menu,
         );
+        if !glass {
+            painter.rect_filled(
+                rect,
+                CornerRadius::from(9.0),
+                Color32::from_rgba_unmultiplied(255, 255, 255, 18),
+            );
+        }
     }
     paint_glyph(
         painter,

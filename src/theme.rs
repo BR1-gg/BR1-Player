@@ -2,7 +2,7 @@ use eframe::egui::{
     self, pos2, vec2, Color32, Mesh, Painter, Pos2, Rect, Shape, Stroke, StrokeKind, TextureHandle,
 };
 
-use crate::config::UiConfig;
+use crate::config::{GlassConfig, UiConfig};
 
 /// The only fixed colour in the app: the near-black canvas the design asks for.
 pub const BLACK: Color32 = Color32::from_rgb(6, 6, 9);
@@ -24,6 +24,8 @@ pub struct Theme {
     pub panel_border_width: f32,
     pub background_color: Color32,
     pub background_dim: f32,
+    /// Liquid-glass material, appearance and target selection.
+    pub liquid: GlassConfig,
 }
 
 impl Theme {
@@ -48,6 +50,7 @@ impl Theme {
                 ui.background_color[2],
             ),
             background_dim: ui.background_dim,
+            liquid: ui.liquid,
         }
     }
 
@@ -222,35 +225,39 @@ pub fn paint_card(
 ) {
     let radius = radius.clamp(0.0, rect.width().min(rect.height()) * 0.5);
 
-    // Soft drop shadow, built from a few translucent rounded rects.
-    for (grow, alpha) in [(8.0, 10u8), (5.0, 16), (2.0, 28)] {
-        painter.rect_filled(
-            rect.expand(grow).translate(vec2(0.0, 3.0)),
-            radius + grow,
-            Color32::from_black_alpha(alpha),
+    let glass_painted = crate::glass::paint_panel(painter, rect, radius, theme, hovered);
+
+    if !glass_painted {
+        // Soft drop shadow, built from a few translucent rounded rects.
+        for (grow, alpha) in [(8.0, 10u8), (5.0, 16), (2.0, 28)] {
+            painter.rect_filled(
+                rect.expand(grow).translate(vec2(0.0, 3.0)),
+                radius + grow,
+                Color32::from_black_alpha(alpha),
+            );
+        }
+
+        gradient_rect(
+            painter,
+            rect,
+            radius,
+            theme.panel_top(),
+            theme.panel_bottom(),
+            theme.angle,
+        );
+
+        // Faint accent sheen from the top edge.
+        gradient_rect(
+            painter,
+            rect.shrink(1.0),
+            (radius - 1.0).max(0.0),
+            with_alpha(theme.accent_a, (10.0 + 18.0 * theme.glow) as u8),
+            Color32::TRANSPARENT,
+            theme.angle + 90.0,
         );
     }
 
-    gradient_rect(
-        painter,
-        rect,
-        radius,
-        theme.panel_top(),
-        theme.panel_bottom(),
-        theme.angle,
-    );
-
-    // Faint accent sheen from the top edge.
-    gradient_rect(
-        painter,
-        rect.shrink(1.0),
-        (radius - 1.0).max(0.0),
-        with_alpha(theme.accent_a, (10.0 + 18.0 * theme.glow) as u8),
-        Color32::TRANSPARENT,
-        theme.angle + 90.0,
-    );
-
-    if theme.panel_border_visible && theme.panel_border_width > 0.01 {
+    if !glass_painted && theme.panel_border_visible && theme.panel_border_width > 0.01 {
         let border = if active {
             with_alpha(theme.accent(), 130)
         } else if hovered {
@@ -435,8 +442,10 @@ pub fn textured_rounded_rect(
     }
     let radius = radius.clamp(0.0, rect.width().min(rect.height()) * 0.5);
     let points = rounded_rect_points(rect, radius, 10);
-    let mut mesh = Mesh::default();
-    mesh.texture_id = texture.id();
+    let mut mesh = Mesh {
+        texture_id: texture.id(),
+        ..Default::default()
+    };
 
     let map_uv = |point: Pos2| {
         let tx = ((point.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
@@ -499,7 +508,20 @@ pub fn paint_icon_button(
     theme: &Theme,
     hovered: bool,
     active: bool,
+    slot: crate::glass::GlassSlot,
 ) {
+    if crate::glass::paint_button(
+        painter,
+        rect,
+        theme,
+        hovered,
+        false,
+        active,
+        false,
+        slot,
+    ) {
+        return;
+    }
     let radius = rect.width().min(rect.height()) * 0.5;
     let fill = if active {
         with_alpha(theme.accent(), 120)
@@ -519,14 +541,22 @@ pub fn paint_icon_button(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn paint_pill(
     painter: &Painter,
     rect: Rect,
     theme: &Theme,
     hovered: bool,
+    pressed: bool,
     active: bool,
     primary: bool,
+    slot: crate::glass::GlassSlot,
 ) {
+    if crate::glass::paint_button(
+        painter, rect, theme, hovered, pressed, active, primary, slot,
+    ) {
+        return;
+    }
     let radius = rect.height() * 0.5;
     if primary {
         let a = if hovered {

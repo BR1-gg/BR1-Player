@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_QUALITY: u16 = 192;
@@ -24,6 +25,349 @@ impl PanelRect {
             w,
             h,
             visible: true,
+        }
+    }
+}
+
+/// Outline used by the liquid-glass renderer. Mirrors `liquid_rust::Shape`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GlassShape {
+    Capsule,
+    Rounded,
+    Circular,
+    Smooth,
+}
+
+impl GlassShape {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Capsule => "Capsule",
+            Self::Rounded => "Rounded",
+            Self::Circular => "Circular",
+            Self::Smooth => "Smooth",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "capsule" => Some(Self::Capsule),
+            "rounded" => Some(Self::Rounded),
+            "circular" => Some(Self::Circular),
+            "smooth" => Some(Self::Smooth),
+            _ => None,
+        }
+    }
+}
+
+/// One `Tone` from liquid-rust: the fills applied to the backdrop under the
+/// glass, in sRGB space, in this order: lift, LUMINOSITY, LIGHTEN, DARKEN.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GlassTone {
+    pub lift: f32,
+    pub luminance: f32,
+    pub luminance_mix: f32,
+    pub lighten: f32,
+    pub darken_to: f32,
+    pub darken: f32,
+}
+
+impl GlassTone {
+    pub const NONE: Self = Self {
+        lift: 0.0,
+        luminance: 0.0,
+        luminance_mix: 0.0,
+        lighten: 0.0,
+        darken_to: 1.0,
+        darken: 0.0,
+    };
+}
+
+/// Drop shadow under the glass, in points.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GlassShadow {
+    pub offset_y: f32,
+    pub blur: f32,
+    pub opacity: f32,
+}
+
+/// Which parts of the UI accept the liquid-glass surface. Every group can be
+/// toggled independently in Settings, so a button can stay flat while its
+/// neighbour is glass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GlassTargets {
+    pub top_bar: bool,
+    pub transport: bool,
+    pub player_chips: bool,
+    pub downloader_actions: bool,
+    pub option_chips: bool,
+    pub menus: bool,
+    pub lists: bool,
+    pub sliders: bool,
+    pub panels: bool,
+    pub settings_controls: bool,
+    pub setup: bool,
+}
+
+impl Default for GlassTargets {
+    fn default() -> Self {
+        // The set chosen for Def Player: transport, player chips, downloader
+        // actions, menus, lists/cards, panels/modals and slider knobs.
+        Self {
+            top_bar: false,
+            transport: true,
+            player_chips: true,
+            downloader_actions: true,
+            option_chips: false,
+            menus: true,
+            lists: true,
+            sliders: true,
+            panels: true,
+            settings_controls: false,
+            setup: false,
+        }
+    }
+}
+
+/// Full liquid-glass configuration. Every public knob of liquid-rust's
+/// `Material`, `Shadow`, `Tone` and `Appearance` is represented here; the
+/// renderer in `glass.rs` resolves them the same way the library does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GlassConfig {
+    pub enabled: bool,
+
+    /* material */
+    pub refraction: f32,
+    pub depth: f32,
+    pub dispersion: f32,
+    pub frost: f32,
+    pub splay: f32,
+    pub specular: f32,
+    pub rim: f32,
+    pub rim_shade: f32,
+    pub hairline: f32,
+    pub edge: f32,
+    pub dim: f32,
+    pub adaptive: bool,
+    pub tint_enabled: bool,
+    pub tint_color: [u8; 3],
+    pub tint_strength: f32,
+    pub shadow: GlassShadow,
+    pub light_tone: GlassTone,
+    pub dark_tone: GlassTone,
+
+    /* appearance */
+    pub dark: bool,
+    pub transparency: f32,
+    pub reduce_transparency: bool,
+    pub increase_contrast: bool,
+    pub reduce_motion: bool,
+    pub adapt_to_content: bool,
+
+    /* scene */
+    pub physics: bool,
+    pub glass_on_glass: bool,
+    pub light_angle: f32,
+    pub merge_spacing: f32,
+
+    /* shape */
+    pub shape: GlassShape,
+    pub shape_radius: f32,
+    pub smoothing: f32,
+
+    /* targets */
+    pub targets: GlassTargets,
+}
+
+impl Default for GlassConfig {
+    fn default() -> Self {
+        // Values from liquid-rust `Material::regular()` and
+        // `Appearance::default()`, with the dark scheme on because the app's
+        // canvas is near black.
+        Self {
+            enabled: true,
+            refraction: 0.7,
+            depth: 30.0,
+            dispersion: 0.2,
+            frost: 10.0,
+            splay: 0.2,
+            specular: 0.3,
+            rim: 0.157,
+            rim_shade: 0.05,
+            hairline: 0.0,
+            edge: 0.2,
+            dim: 0.0,
+            adaptive: true,
+            tint_enabled: false,
+            tint_color: [0, 136, 255],
+            tint_strength: 0.85,
+            shadow: GlassShadow {
+                offset_y: 8.0,
+                blur: 15.0,
+                opacity: 0.06,
+            },
+            light_tone: GlassTone {
+                lift: 0.0,
+                luminance: 0.92,
+                luminance_mix: 0.3,
+                lighten: 0.2,
+                darken_to: 0.75,
+                darken: 0.1,
+            },
+            dark_tone: GlassTone {
+                lift: 0.03,
+                luminance: 0.25,
+                luminance_mix: 0.2,
+                lighten: 0.0,
+                darken_to: 0.0,
+                darken: 0.25,
+            },
+            dark: true,
+            transparency: 0.5,
+            reduce_transparency: false,
+            increase_contrast: false,
+            reduce_motion: false,
+            adapt_to_content: true,
+            physics: true,
+            glass_on_glass: true,
+            light_angle: 0.0,
+            merge_spacing: 0.0,
+            shape: GlassShape::Capsule,
+            shape_radius: 18.0,
+            smoothing: 0.6,
+            targets: GlassTargets::default(),
+        }
+    }
+}
+
+impl GlassConfig {
+    /// Applies one of liquid-rust's material presets. Appearance, scene,
+    /// shape and target settings are left untouched.
+    pub fn apply_preset(&mut self, preset: GlassPreset) {
+        let material = GlassConfig::default();
+        match preset {
+            GlassPreset::Regular => {
+                self.copy_material_from(&material);
+            }
+            GlassPreset::Clear => {
+                self.copy_material_from(&material);
+                let tone = GlassTone {
+                    lift: 0.063,
+                    luminance: 1.0,
+                    luminance_mix: 0.04,
+                    lighten: 0.0,
+                    darken_to: 1.0,
+                    darken: 0.0,
+                };
+                self.refraction = 0.7;
+                self.depth = 30.0;
+                self.dispersion = 0.2;
+                self.frost = 6.0;
+                self.splay = 0.2;
+                self.specular = 0.4;
+                self.rim = 0.157;
+                self.rim_shade = 0.098;
+                self.hairline = 0.0;
+                self.edge = 0.2;
+                self.shadow = GlassShadow {
+                    offset_y: 8.0,
+                    blur: 15.0,
+                    opacity: 0.02,
+                };
+                self.light_tone = tone;
+                self.dark_tone = tone;
+                self.adaptive = false;
+            }
+            GlassPreset::ClearBar => {
+                self.apply_preset(GlassPreset::Clear);
+                self.frost = 3.0;
+                self.specular = 0.2;
+                self.rim_shade = 0.0;
+                self.hairline = 0.157;
+                let tone = GlassTone {
+                    lift: 0.0,
+                    luminance: 0.6,
+                    luminance_mix: 0.33,
+                    lighten: 0.0,
+                    darken_to: 1.0,
+                    darken: 0.0,
+                };
+                self.light_tone = tone;
+                self.dark_tone = tone;
+            }
+            GlassPreset::Tinted => {
+                self.apply_preset(GlassPreset::Regular);
+                self.tint_enabled = true;
+                self.tint_color = [0, 136, 255];
+                self.tint_strength = 1.0;
+            }
+            GlassPreset::Identity => {
+                self.copy_material_from(&GlassConfig {
+                    refraction: 0.0,
+                    depth: 1.0,
+                    dispersion: 0.0,
+                    frost: 0.0,
+                    splay: 0.0,
+                    specular: 0.0,
+                    rim: 0.0,
+                    rim_shade: 0.0,
+                    hairline: 0.0,
+                    edge: 0.0,
+                    dim: 0.0,
+                    adaptive: false,
+                    tint_enabled: false,
+                    shadow: GlassShadow {
+                        offset_y: 0.0,
+                        blur: 0.0,
+                        opacity: 0.0,
+                    },
+                    light_tone: GlassTone::NONE,
+                    dark_tone: GlassTone::NONE,
+                    ..GlassConfig::default()
+                });
+            }
+        }
+    }
+
+    fn copy_material_from(&mut self, source: &GlassConfig) {
+        self.refraction = source.refraction;
+        self.depth = source.depth;
+        self.dispersion = source.dispersion;
+        self.frost = source.frost;
+        self.splay = source.splay;
+        self.specular = source.specular;
+        self.rim = source.rim;
+        self.rim_shade = source.rim_shade;
+        self.hairline = source.hairline;
+        self.edge = source.edge;
+        self.dim = source.dim;
+        self.adaptive = source.adaptive;
+        self.tint_enabled = source.tint_enabled;
+        self.tint_color = source.tint_color;
+        self.tint_strength = source.tint_strength;
+        self.shadow = source.shadow;
+        self.light_tone = source.light_tone;
+        self.dark_tone = source.dark_tone;
+    }
+}
+
+/// Material presets from liquid-rust's README.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GlassPreset {
+    Regular,
+    Clear,
+    ClearBar,
+    Tinted,
+    Identity,
+}
+
+impl GlassPreset {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Regular => "REGULAR",
+            Self::Clear => "CLEAR",
+            Self::ClearBar => "CLEAR BAR",
+            Self::Tinted => "TINTED",
+            Self::Identity => "IDENTITY",
         }
     }
 }
@@ -68,6 +412,8 @@ pub struct UiConfig {
     pub eq_gains: [f32; EQ_BANDS],
     pub volume: f32,
     pub muted: bool,
+    /// Apple-style liquid glass for the selected component groups.
+    pub liquid: GlassConfig,
 }
 
 impl Default for UiConfig {
@@ -107,6 +453,7 @@ impl Default for UiConfig {
             eq_gains: [0.0; EQ_BANDS],
             volume: 0.8,
             muted: false,
+            liquid: GlassConfig::default(),
         }
     }
 }
@@ -207,6 +554,12 @@ fn parse_eq(value: &str) -> Option<[f32; EQ_BANDS]> {
         count += 1;
     }
     (count == EQ_BANDS).then_some(gains)
+}
+
+fn set_f32(target: &mut f32, value: &str, min: f32, max: f32) {
+    if let Ok(parsed) = value.parse::<f32>() {
+        *target = parsed.clamp(min, max);
+    }
 }
 
 fn panel_key(index: usize) -> &'static str {
@@ -335,6 +688,93 @@ pub fn load_from(path: &Path) -> Option<Config> {
                 }
             }
             "muted" => ui.muted = value == "1" || value.eq_ignore_ascii_case("true"),
+            "ui_glass_enabled" => ui.liquid.enabled = parse_bool(value),
+            "ui_glass_refraction" => set_f32(&mut ui.liquid.refraction, value, 0.0, 1.0),
+            "ui_glass_depth" => set_f32(&mut ui.liquid.depth, value, 0.0, 120.0),
+            "ui_glass_dispersion" => set_f32(&mut ui.liquid.dispersion, value, 0.0, 1.0),
+            "ui_glass_frost" => set_f32(&mut ui.liquid.frost, value, 0.0, 80.0),
+            "ui_glass_splay" => set_f32(&mut ui.liquid.splay, value, 0.0, 1.0),
+            "ui_glass_specular" => set_f32(&mut ui.liquid.specular, value, 0.0, 1.0),
+            "ui_glass_rim" => set_f32(&mut ui.liquid.rim, value, 0.0, 1.0),
+            "ui_glass_rim_shade" => set_f32(&mut ui.liquid.rim_shade, value, 0.0, 1.0),
+            "ui_glass_hairline" => set_f32(&mut ui.liquid.hairline, value, 0.0, 1.0),
+            "ui_glass_edge" => set_f32(&mut ui.liquid.edge, value, 0.0, 1.0),
+            "ui_glass_dim" => set_f32(&mut ui.liquid.dim, value, 0.0, 1.0),
+            "ui_glass_adaptive" => ui.liquid.adaptive = parse_bool(value),
+            "ui_glass_tint_enabled" => ui.liquid.tint_enabled = parse_bool(value),
+            "ui_glass_tint_color" => {
+                if let Some(color) = parse_color(value) {
+                    ui.liquid.tint_color = color;
+                }
+            }
+            "ui_glass_tint_strength" => set_f32(&mut ui.liquid.tint_strength, value, 0.0, 1.0),
+            "ui_glass_shadow_offset" => set_f32(&mut ui.liquid.shadow.offset_y, value, -40.0, 40.0),
+            "ui_glass_shadow_blur" => set_f32(&mut ui.liquid.shadow.blur, value, 0.0, 100.0),
+            "ui_glass_shadow_opacity" => set_f32(&mut ui.liquid.shadow.opacity, value, 0.0, 1.0),
+            "ui_glass_light_lift" => set_f32(&mut ui.liquid.light_tone.lift, value, 0.0, 0.5),
+            "ui_glass_light_luminance" => {
+                set_f32(&mut ui.liquid.light_tone.luminance, value, 0.0, 1.0)
+            }
+            "ui_glass_light_luminance_mix" => {
+                set_f32(&mut ui.liquid.light_tone.luminance_mix, value, 0.0, 1.0)
+            }
+            "ui_glass_light_lighten" => {
+                set_f32(&mut ui.liquid.light_tone.lighten, value, 0.0, 1.0)
+            }
+            "ui_glass_light_darken_to" => {
+                set_f32(&mut ui.liquid.light_tone.darken_to, value, 0.0, 1.0)
+            }
+            "ui_glass_light_darken" => {
+                set_f32(&mut ui.liquid.light_tone.darken, value, 0.0, 1.0)
+            }
+            "ui_glass_dark_lift" => set_f32(&mut ui.liquid.dark_tone.lift, value, 0.0, 0.5),
+            "ui_glass_dark_luminance" => {
+                set_f32(&mut ui.liquid.dark_tone.luminance, value, 0.0, 1.0)
+            }
+            "ui_glass_dark_luminance_mix" => {
+                set_f32(&mut ui.liquid.dark_tone.luminance_mix, value, 0.0, 1.0)
+            }
+            "ui_glass_dark_lighten" => set_f32(&mut ui.liquid.dark_tone.lighten, value, 0.0, 1.0),
+            "ui_glass_dark_darken_to" => {
+                set_f32(&mut ui.liquid.dark_tone.darken_to, value, 0.0, 1.0)
+            }
+            "ui_glass_dark_darken" => set_f32(&mut ui.liquid.dark_tone.darken, value, 0.0, 1.0),
+            "ui_glass_dark_scheme" => ui.liquid.dark = parse_bool(value),
+            "ui_glass_transparency" => set_f32(&mut ui.liquid.transparency, value, 0.0, 1.0),
+            "ui_glass_reduce_transparency" => ui.liquid.reduce_transparency = parse_bool(value),
+            "ui_glass_increase_contrast" => ui.liquid.increase_contrast = parse_bool(value),
+            "ui_glass_reduce_motion" => ui.liquid.reduce_motion = parse_bool(value),
+            "ui_glass_adapt_to_content" => ui.liquid.adapt_to_content = parse_bool(value),
+            "ui_glass_physics" => ui.liquid.physics = parse_bool(value),
+            "ui_glass_on_glass" => ui.liquid.glass_on_glass = parse_bool(value),
+            "ui_glass_light_angle" => {
+                if let Ok(parsed) = value.parse::<f32>() {
+                    ui.liquid.light_angle = parsed.rem_euclid(360.0);
+                }
+            }
+            "ui_glass_merge_spacing" => set_f32(&mut ui.liquid.merge_spacing, value, 0.0, 80.0),
+            "ui_glass_shape" => {
+                if let Some(shape) = GlassShape::parse(value) {
+                    ui.liquid.shape = shape;
+                }
+            }
+            "ui_glass_shape_radius" => set_f32(&mut ui.liquid.shape_radius, value, 0.0, 120.0),
+            "ui_glass_smoothing" => set_f32(&mut ui.liquid.smoothing, value, 0.0, 1.0),
+            "ui_glass_target_top_bar" => ui.liquid.targets.top_bar = parse_bool(value),
+            "ui_glass_target_transport" => ui.liquid.targets.transport = parse_bool(value),
+            "ui_glass_target_player_chips" => ui.liquid.targets.player_chips = parse_bool(value),
+            "ui_glass_target_downloader_actions" => {
+                ui.liquid.targets.downloader_actions = parse_bool(value)
+            }
+            "ui_glass_target_option_chips" => ui.liquid.targets.option_chips = parse_bool(value),
+            "ui_glass_target_menus" => ui.liquid.targets.menus = parse_bool(value),
+            "ui_glass_target_lists" => ui.liquid.targets.lists = parse_bool(value),
+            "ui_glass_target_sliders" => ui.liquid.targets.sliders = parse_bool(value),
+            "ui_glass_target_panels" => ui.liquid.targets.panels = parse_bool(value),
+            "ui_glass_target_settings_controls" => {
+                ui.liquid.targets.settings_controls = parse_bool(value)
+            }
+            "ui_glass_target_setup" => ui.liquid.targets.setup = parse_bool(value),
             key => {
                 for index in 0..PANEL_COUNT {
                     if key == panel_key(index) {
@@ -432,7 +872,125 @@ pub fn save_to(path: &Path, config: &Config) {
             if panel.visible { 1 } else { 0 }
         ));
     }
+    push_glass(&mut text, &ui.liquid);
     let _ = std::fs::write(path, text);
+}
+
+fn push_glass(text: &mut String, glass: &GlassConfig) {
+    let _ = writeln!(text, "ui_glass_enabled={}", u8::from(glass.enabled));
+    let _ = writeln!(text, "ui_glass_refraction={:.4}", glass.refraction);
+    let _ = writeln!(text, "ui_glass_depth={:.3}", glass.depth);
+    let _ = writeln!(text, "ui_glass_dispersion={:.4}", glass.dispersion);
+    let _ = writeln!(text, "ui_glass_frost={:.3}", glass.frost);
+    let _ = writeln!(text, "ui_glass_splay={:.4}", glass.splay);
+    let _ = writeln!(text, "ui_glass_specular={:.4}", glass.specular);
+    let _ = writeln!(text, "ui_glass_rim={:.4}", glass.rim);
+    let _ = writeln!(text, "ui_glass_rim_shade={:.4}", glass.rim_shade);
+    let _ = writeln!(text, "ui_glass_hairline={:.4}", glass.hairline);
+    let _ = writeln!(text, "ui_glass_edge={:.4}", glass.edge);
+    let _ = writeln!(text, "ui_glass_dim={:.4}", glass.dim);
+    let _ = writeln!(text, "ui_glass_adaptive={}", u8::from(glass.adaptive));
+    let _ = writeln!(text, "ui_glass_tint_enabled={}", u8::from(glass.tint_enabled));
+    let _ = writeln!(
+        text,
+        "ui_glass_tint_color=#{:02X}{:02X}{:02X}",
+        glass.tint_color[0], glass.tint_color[1], glass.tint_color[2]
+    );
+    let _ = writeln!(text, "ui_glass_tint_strength={:.4}", glass.tint_strength);
+    let _ = writeln!(text, "ui_glass_shadow_offset={:.3}", glass.shadow.offset_y);
+    let _ = writeln!(text, "ui_glass_shadow_blur={:.3}", glass.shadow.blur);
+    let _ = writeln!(text, "ui_glass_shadow_opacity={:.4}", glass.shadow.opacity);
+    push_tone(text, "ui_glass_light", &glass.light_tone);
+    push_tone(text, "ui_glass_dark", &glass.dark_tone);
+    let _ = writeln!(text, "ui_glass_dark_scheme={}", u8::from(glass.dark));
+    let _ = writeln!(text, "ui_glass_transparency={:.4}", glass.transparency);
+    let _ = writeln!(
+        text,
+        "ui_glass_reduce_transparency={}",
+        u8::from(glass.reduce_transparency)
+    );
+    let _ = writeln!(
+        text,
+        "ui_glass_increase_contrast={}",
+        u8::from(glass.increase_contrast)
+    );
+    let _ = writeln!(text, "ui_glass_reduce_motion={}", u8::from(glass.reduce_motion));
+    let _ = writeln!(
+        text,
+        "ui_glass_adapt_to_content={}",
+        u8::from(glass.adapt_to_content)
+    );
+    let _ = writeln!(text, "ui_glass_physics={}", u8::from(glass.physics));
+    let _ = writeln!(text, "ui_glass_on_glass={}", u8::from(glass.glass_on_glass));
+    let _ = writeln!(text, "ui_glass_light_angle={:.2}", glass.light_angle);
+    let _ = writeln!(text, "ui_glass_merge_spacing={:.3}", glass.merge_spacing);
+    let _ = writeln!(text, "ui_glass_shape={}", glass.shape.label());
+    let _ = writeln!(text, "ui_glass_shape_radius={:.3}", glass.shape_radius);
+    let _ = writeln!(text, "ui_glass_smoothing={:.4}", glass.smoothing);
+    let _ = writeln!(
+        text,
+        "ui_glass_target_top_bar={}",
+        u8::from(glass.targets.top_bar)
+    );
+    let _ = writeln!(
+        text,
+        "ui_glass_target_transport={}",
+        u8::from(glass.targets.transport)
+    );
+    let _ = writeln!(
+        text,
+        "ui_glass_target_player_chips={}",
+        u8::from(glass.targets.player_chips)
+    );
+    let _ = writeln!(
+        text,
+        "ui_glass_target_downloader_actions={}",
+        u8::from(glass.targets.downloader_actions)
+    );
+    let _ = writeln!(
+        text,
+        "ui_glass_target_option_chips={}",
+        u8::from(glass.targets.option_chips)
+    );
+    let _ = writeln!(
+        text,
+        "ui_glass_target_menus={}",
+        u8::from(glass.targets.menus)
+    );
+    let _ = writeln!(
+        text,
+        "ui_glass_target_lists={}",
+        u8::from(glass.targets.lists)
+    );
+    let _ = writeln!(
+        text,
+        "ui_glass_target_sliders={}",
+        u8::from(glass.targets.sliders)
+    );
+    let _ = writeln!(
+        text,
+        "ui_glass_target_panels={}",
+        u8::from(glass.targets.panels)
+    );
+    let _ = writeln!(
+        text,
+        "ui_glass_target_settings_controls={}",
+        u8::from(glass.targets.settings_controls)
+    );
+    let _ = writeln!(
+        text,
+        "ui_glass_target_setup={}",
+        u8::from(glass.targets.setup)
+    );
+}
+
+fn push_tone(text: &mut String, prefix: &str, tone: &GlassTone) {
+    let _ = writeln!(text, "{prefix}_lift={:.4}", tone.lift);
+    let _ = writeln!(text, "{prefix}_luminance={:.4}", tone.luminance);
+    let _ = writeln!(text, "{prefix}_luminance_mix={:.4}", tone.luminance_mix);
+    let _ = writeln!(text, "{prefix}_lighten={:.4}", tone.lighten);
+    let _ = writeln!(text, "{prefix}_darken_to={:.4}", tone.darken_to);
+    let _ = writeln!(text, "{prefix}_darken={:.4}", tone.darken);
 }
 
 /// Reads the config, migrating the old single-path settings file if needed.
@@ -492,6 +1050,17 @@ mod tests {
             visible: false,
         };
         original.ui.eq_gains[3] = 4.5;
+        original.ui.liquid.transparency = 0.75;
+        original.ui.liquid.dark = false;
+        original.ui.liquid.tint_enabled = true;
+        original.ui.liquid.tint_color = [10, 20, 30];
+        original.ui.liquid.tint_strength = 0.5;
+        original.ui.liquid.shape = GlassShape::Smooth;
+        original.ui.liquid.shape_radius = 24.0;
+        original.ui.liquid.smoothing = 0.6;
+        original.ui.liquid.targets.top_bar = true;
+        original.ui.liquid.targets.setup = true;
+        original.ui.liquid.dark_tone.lift = 0.125;
         save_to(&path, &original);
 
         let loaded = load_from(&path).expect("config should load");
@@ -512,6 +1081,52 @@ mod tests {
         );
         assert_eq!(loaded.ui.background_dim, 0.4);
         assert_eq!(loaded.ui.eq_gains[3], 4.5);
+        assert_eq!(loaded.ui.liquid.transparency, 0.75);
+        assert_eq!(loaded.ui.liquid.dark, false);
+        assert_eq!(loaded.ui.liquid.tint_enabled, true);
+        assert_eq!(loaded.ui.liquid.tint_color, [10, 20, 30]);
+        assert_eq!(loaded.ui.liquid.tint_strength, 0.5);
+        assert_eq!(loaded.ui.liquid.shape, GlassShape::Smooth);
+        assert_eq!(loaded.ui.liquid.shape_radius, 24.0);
+        assert_eq!(loaded.ui.liquid.smoothing, 0.6);
+        assert_eq!(loaded.ui.liquid.targets.top_bar, true);
+        assert_eq!(loaded.ui.liquid.targets.setup, true);
+        assert_eq!(loaded.ui.liquid.dark_tone.lift, 0.125);
+        assert_eq!(loaded.ui.liquid.targets.transport, true);
+        assert_eq!(loaded.ui.liquid.targets.settings_controls, false);
+    }
+
+    #[test]
+    fn default_glass_targets_match_selection() {
+        let targets = GlassTargets::default();
+        assert!(targets.transport);
+        assert!(targets.player_chips);
+        assert!(targets.downloader_actions);
+        assert!(targets.menus);
+        assert!(targets.lists);
+        assert!(targets.sliders);
+        assert!(targets.panels);
+        assert!(!targets.top_bar);
+        assert!(!targets.option_chips);
+        assert!(!targets.settings_controls);
+        assert!(!targets.setup);
+    }
+
+    #[test]
+    fn glass_presets_change_material_only() {
+        let mut glass = GlassConfig::default();
+        glass.targets.top_bar = true;
+        glass.apply_preset(GlassPreset::ClearBar);
+        assert_eq!(glass.frost, 3.0);
+        assert_eq!(glass.hairline, 0.157);
+        assert!(!glass.adaptive);
+        assert!(glass.targets.top_bar);
+        assert!(glass.targets.transport);
+
+        glass.apply_preset(GlassPreset::Tinted);
+        assert!(glass.tint_enabled);
+        assert_eq!(glass.tint_color, [0, 136, 255]);
+        assert!(glass.targets.top_bar);
     }
 
     #[test]

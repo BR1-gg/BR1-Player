@@ -236,7 +236,7 @@ where
 
     fn next(&mut self) -> Option<f32> {
         let raw = self.inner.next()?;
-        if self.frame % 2_048 == 0 {
+        if self.frame.is_multiple_of(2_048) {
             self.refresh();
         }
 

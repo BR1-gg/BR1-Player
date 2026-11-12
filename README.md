@@ -41,6 +41,102 @@ is independently themeable from **Settings → Appearance**:
 
 The settings are saved to `config.txt`.
 
+## Liquid Glass
+
+Def Player has an optional Apple-style **Liquid Glass** surface. Toggle it at
+**Settings → Appearance → Enable Liquid Glass mode**, then open the **GLASS** tab
+for the full material editor. It is a native egui port of the material model from
+[liquid-rust](https://github.com/al1h3n/liquid-rust) (MIT OR Apache-2.0): the same
+presets, tone fills, size adaptation, iOS 27 transparency slider and accessibility
+switches. The app keeps its OpenGL/egui renderer, so frost and refraction are
+reproduced with bevel bands and a directional rim light rather than a wgpu
+backdrop pass.
+
+### Targets
+
+Each group can be enabled independently:
+
+| Target | Components |
+| --- | --- |
+| Top bar | `+`, settings, search pill |
+| Transport | previous / play-pause / next / mute, including the mini player |
+| Player chips | shuffle and repeat |
+| Downloader actions | Download, Cancel All, Change Folder, Clear, Log, cancel `×` |
+| Option chips | quality, parallel, EQ on/off, EQ/BARS, EQ presets |
+| Menus and popups | add menu, search results |
+| Lists and cards | track rows, playlist cover rings, download queue rows, search rows |
+| Slider balls only | seek, volume and EQ knobs (the track stays flat) |
+| Panels and modals | the five dashboard panels, settings card, preview card |
+| Settings controls | settings tabs, action pills, toggles, colour presets |
+| Setup screen | Choose folder, Use default, Start using Def Player |
+
+Defaults: transport, player chips, downloader actions, menus, lists, slider balls
+and panels are on; the rest are off.
+
+### Material
+
+| Setting | Range | What it does |
+| --- | --- | --- |
+| Refraction | 0–1 | strength of the bevel bands |
+| Depth | 0–80 pt | how far the bevel reaches inward |
+| Dispersion | 0–1 | chromatic split along the bevel |
+| Frost | 0–60 pt | white frost veil / blur weight |
+| Splay | 0–1 | how widely the rim light spreads |
+| Specular | 0–1 | strength of the lit rim |
+| Rim | 0–1 | bright inner edge |
+| Rim shade | 0–1 | soft shade opposite the light |
+| Hairline | 0–1 | crisp 1.25 pt chrome line |
+| Edge | 0–1 | darkened outer line |
+| Dim | 0–1 | local backdrop dimming |
+| Adaptive | on/off | large glass becomes thicker and more opaque |
+| Tint | on/off + colour + strength | stained-glass colour |
+| Shadow offset Y / blur / opacity | −30–40 pt / 0–100 pt / 0–1 | drop shadow |
+
+### Light face and dark face tones
+
+Both faces expose liquid-rust's six tone operations. They run in sRGB space in
+this order:
+
+| Setting | Range | Operation |
+| --- | --- | --- |
+| Lift | 0–0.5 | `LINEAR_DODGE` grey |
+| Luminance target | 0–1 | target of the `LUMINOSITY` fill |
+| Luminance mix | 0–1 | opacity of that fill |
+| Lighten | 0–1 | white `LIGHTEN` fill |
+| Darken to | 0–1 | grey used by the `DARKEN` fill |
+| Darken | 0–1 | opacity of that fill |
+
+### Appearance and scene
+
+| Setting | What it does |
+| --- | --- |
+| Dark colour scheme | choose the dark or light face for large glass |
+| Transparency | iOS 27 slider: 0 ultra clear, 0.5 default, 1 fully tinted |
+| Reduce Transparency | frostier, more opaque glass with tinted faces |
+| Increase Contrast | stronger outer edge and a contrasting border |
+| Reduce Motion | disables press/hover motion |
+| Adapt to content | small glass may flip light/dark with the backdrop |
+| Physics | hover/press motion on or off |
+| Glass on glass | enables the extra panel specular pass |
+| Light angle | 0° = top, clockwise; drives rim and highlight direction |
+| Merge distance | reserved for grouped glass (exposed for parity with liquid-rust) |
+
+### Shape
+
+| Setting | What it does |
+| --- | --- |
+| Button outline | Capsule, Rounded, Circular or Smooth |
+| Shape radius | corner radius for Rounded / Smooth |
+| Smoothing | 0 = circular, 0.6 = iOS squircle |
+
+Panels and modals always use the **Corner radius** from the Appearance tab.
+Presets **Regular**, **Clear**, **Clear Bar**, **Tinted** and **Identity** reset
+only the material values; targets, appearance, shape and scene are kept.
+
+All glass values are stored in `config.txt` under keys beginning with
+`ui_glass_` (for example `ui_glass_transparency`, `ui_glass_tint_color`,
+`ui_glass_target_transport`).
+
 ## What it does
 
 - **First-run setup** — you choose the main music folder before anything else happens.
@@ -185,6 +281,7 @@ terms of service of the sites you use.
 | `src/queue.rs` | parallel download queue, per-job progress and cancellation |
 | `src/config.rs` | folder, quality, theme, dashboard layout and EQ settings (`%APPDATA%\DefPlayer\config.txt`) |
 | `src/theme.rs` | gradient/glass painting helpers and colour mixing |
+| `src/glass.rs` | liquid-glass material resolution, squircle geometry and painting |
 | `src/ui.rs` | custom-painted widgets and glyphs |
 | `src/visualizer.rs` | small FFT used by the spectrum view |
 
