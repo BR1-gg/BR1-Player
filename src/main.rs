@@ -131,33 +131,33 @@ impl App {
 
         let raw_input = state.take_egui_input(&window);
         player.update_logic(&self.egui_ctx);
-
-        let background_output = self
-            .egui_ctx
-            .run_ui(raw_input.clone(), |ui| player.draw_background(ui));
         glass::begin_frame();
-        let foreground_output = self
-            .egui_ctx
-            .run_ui(raw_input, |ui| player.draw_foreground(ui));
+
+        let mut content_shape_count = 0usize;
+        let output = self.egui_ctx.run_ui(raw_input, |ui| {
+            player.draw_background(ui);
+            content_shape_count = self.egui_ctx.graphics(|graphics| {
+                graphics
+                    .get(egui::LayerId::background())
+                    .map(|list| list.all_entries().len())
+                    .unwrap_or(0)
+            });
+            player.draw_foreground(ui);
+        });
         let specs = glass::take_specs();
 
         let egui::FullOutput {
-            platform_output: _background_platform,
-            textures_delta: background_textures,
-            shapes: background_shapes,
+            platform_output,
+            mut textures_delta,
+            mut shapes,
             pixels_per_point,
             ..
-        } = background_output;
-        let mut background_delta = background_textures;
-        let egui::FullOutput {
-            platform_output,
-            textures_delta: foreground_textures,
-            shapes: foreground_shapes,
-            ..
-        } = foreground_output;
-        let mut foreground_delta = foreground_textures;
+        } = output;
 
         state.handle_platform_output(&window, platform_output);
+        let split = content_shape_count.min(shapes.len());
+        let foreground_shapes = shapes.split_off(split);
+        let background_shapes = shapes;
         let background_primitives =
             self.egui_ctx.tessellate(background_shapes, pixels_per_point);
         let foreground_primitives =
@@ -171,25 +171,13 @@ impl App {
             &mut gpu.renderer_content,
             &gpu.device,
             &gpu.queue,
-            &background_delta,
+            &textures_delta,
         );
         apply_textures(
             &mut gpu.renderer_surface,
             &gpu.device,
             &gpu.queue,
-            &background_delta,
-        );
-        apply_textures(
-            &mut gpu.renderer_content,
-            &gpu.device,
-            &gpu.queue,
-            &foreground_delta,
-        );
-        apply_textures(
-            &mut gpu.renderer_surface,
-            &gpu.device,
-            &gpu.queue,
-            &foreground_delta,
+            &textures_delta,
         );
 
         let mut encoder = gpu
@@ -304,12 +292,11 @@ impl App {
         gpu.queue.submit(std::iter::once(encoder.finish()));
         gpu.queue.present(surface_texture);
 
-        for id in background_delta.free.iter().chain(foreground_delta.free.iter()) {
+        for id in &textures_delta.free {
             gpu.renderer_content.free_texture(id);
             gpu.renderer_surface.free_texture(id);
         }
-        background_delta.clear();
-        foreground_delta.clear();
+        textures_delta.clear();
     }
 }
 

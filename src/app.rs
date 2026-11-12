@@ -4563,7 +4563,7 @@ impl PlayerApp {
         )
     }
 
-    fn paint_player_art(&self, ui: &Ui, rect: Rect, theme: &Theme) {
+    fn paint_player_art(&self, painter: &egui::Painter, rect: Rect, theme: &Theme) {
         let border_inset = if theme.panel_border_visible {
             theme.panel_border_width.max(0.0)
         } else {
@@ -4589,10 +4589,16 @@ impl PlayerApp {
         };
 
         if let Some(texture) = &texture {
-            ui::paint_cover(ui, art, Some(texture), art_radius, theme);
+            theme::textured_rounded_rect(
+                painter,
+                art,
+                art_radius,
+                texture,
+                theme::texture_uv(texture.size_vec2(), art.size()),
+            );
         } else {
             theme::gradient_rect(
-                ui.painter(),
+                painter,
                 art,
                 art_radius,
                 theme::lerp_color(theme.panel_top(), theme.accent_a, 0.30),
@@ -4602,7 +4608,7 @@ impl PlayerApp {
         }
 
         theme::gradient_rect(
-            ui.painter(),
+            painter,
             art,
             art_radius,
             Color32::from_rgba_unmultiplied(5, 5, 8, 40),
@@ -4611,61 +4617,57 @@ impl PlayerApp {
         );
     }
 
-    /// First egui pass: only the backdrop and the dashboard frame. This is
-    /// what the real glass refracts.
+    /// Background content: the backdrop and dashboard frame/artwork that the
+    /// real glass refracts. Painted into the root (Background) layer.
     pub fn draw_background(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme;
-        egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(theme.bg()))
-            .show(ui, |ui| {
-                let rect = ui.max_rect();
-                let time = ui.input(|input| input.time);
-                theme::paint_backdrop(ui.painter(), rect, &theme, time);
+        let rect = ui.max_rect();
+        let time = ui.input(|input| input.time);
+        theme::paint_backdrop(ui.painter(), rect, &theme, time);
 
-                if self.view == View::Dashboard {
-                    let (_, frame_rect) = Self::layout_rects(rect);
-                    theme::paint_dashboard_frame(
-                        ui.painter(),
-                        frame_rect,
-                        &theme,
-                        self.background_tex.as_ref(),
-                    );
-                    let content = Self::dashboard_content(frame_rect);
-                    if self.config.ui.panels[PanelKind::Player.index()].visible {
-                        let player = self.panel_rect(content, PanelKind::Player);
-                        if player.width() > 40.0 && player.height() > 30.0 {
-                            self.paint_player_art(ui, player, &theme);
-                        }
-                    }
-                    if self.settings_open {
-                        ui.painter().rect_filled(
-                            rect,
-                            0.0,
-                            Color32::from_rgba_unmultiplied(2, 2, 4, 205),
-                        );
-                        let modal = Rect::from_center_size(
-                            rect.center(),
-                            vec2(
-                                (rect.width() * 0.82).min(780.0),
-                                (rect.height() * 0.86).min(650.0),
-                            ),
-                        );
-                        theme::gradient_rect(
-                            ui.painter(),
-                            modal,
-                            20.0,
-                            theme::lerp_color(theme.panel_top(), theme.accent_a, 0.18),
-                            theme::lerp_color(theme.panel_bottom(), theme.accent_b, 0.12),
-                            theme.angle,
-                        );
-                    }
+        if self.view == View::Dashboard {
+            let (_, frame_rect) = Self::layout_rects(rect);
+            theme::paint_dashboard_frame(
+                ui.painter(),
+                frame_rect,
+                &theme,
+                self.background_tex.as_ref(),
+            );
+            let content = Self::dashboard_content(frame_rect);
+            if self.config.ui.panels[PanelKind::Player.index()].visible {
+                let player = self.panel_rect(content, PanelKind::Player);
+                if player.width() > 40.0 && player.height() > 30.0 {
+                    self.paint_player_art(ui.painter(), player, &theme);
                 }
-            });
+            }
+            if self.settings_open {
+                ui.painter().rect_filled(
+                    rect,
+                    0.0,
+                    Color32::from_rgba_unmultiplied(2, 2, 4, 205),
+                );
+                let modal = Rect::from_center_size(
+                    rect.center(),
+                    vec2(
+                        (rect.width() * 0.82).min(780.0),
+                        (rect.height() * 0.86).min(650.0),
+                    ),
+                );
+                theme::gradient_rect(
+                    ui.painter(),
+                    modal,
+                    20.0,
+                    theme::lerp_color(theme.panel_top(), theme.accent_a, 0.18),
+                    theme::lerp_color(theme.panel_bottom(), theme.accent_b, 0.12),
+                    theme.angle,
+                );
+            }
+        }
     }
 
-    /// Second egui pass: labels, artwork, panel content and the non-glass
-    /// controls. Glass-target backgrounds are skipped and recorded for the
-    /// liquid-rust scene, so they land between the two passes.
+    /// Foreground UI: labels, artwork, panel content and the non-glass controls.
+    /// Painted after the background content in the same egui pass; glass-target
+    /// backgrounds are skipped and recorded for the liquid-rust scene.
     pub fn draw_foreground(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         let ctx = &ctx;
@@ -4905,8 +4907,7 @@ fn snap_layout_resize(
     )
 }
 
-fn format_duration(seconds: f32) -> String {
-    if !seconds.is_finite() || seconds < 0.0 {
+fn format_duration(seconds: f32) -> String {    if !seconds.is_finite() || seconds < 0.0 {
         return "0:00".to_string();
     }
     let total = seconds.round() as u64;
@@ -4949,3 +4950,111 @@ fn configure_style(ctx: &egui::Context, theme: &Theme) {
     ctx.set_style_of(egui::Theme::Dark, style.clone());
     ctx.set_style_of(egui::Theme::Light, style);
 }
+
+#[cfg(test)]
+mod glass_click_tests {
+    use super::*;
+
+    fn run_frame(
+        ctx: &egui::Context,
+        app: &mut PlayerApp,
+        input: egui::RawInput,
+        _screen: Rect,
+    ) {
+        let mut output = ctx.run_ui(input, |ui| {
+            app.draw_background(ui);
+            app.draw_foreground(ui);
+        });
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn settings_button_opens_in_single_pass() {
+        let ctx = egui::Context::default();
+        let mut app = PlayerApp::new(&ctx, Vec::new(), false, false, None, false);
+        app.view = View::Dashboard;
+        app.settings_open = false;
+
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(1180.0, 760.0));
+        let pointer = pos2(1141.0, 36.0);
+        let frames = [
+            egui::RawInput {
+                screen_rect: Some(screen),
+                time: Some(0.5),
+                focused: true,
+                events: vec![egui::Event::PointerMoved(pointer)],
+                ..Default::default()
+            },
+            egui::RawInput {
+                screen_rect: Some(screen),
+                time: Some(1.0),
+                focused: true,
+                events: vec![egui::Event::PointerButton {
+                    pos: pointer,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                }],
+                ..Default::default()
+            },
+            egui::RawInput {
+                screen_rect: Some(screen),
+                time: Some(1.2),
+                focused: true,
+                events: vec![egui::Event::PointerButton {
+                    pos: pointer,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Default::default(),
+                }],
+                ..Default::default()
+            },
+        ];
+
+        for frame in frames {
+            run_frame(&ctx, &mut app, frame, screen);
+        }
+
+        assert!(app.settings_open, "settings button did not receive the click");
+
+        let close = pos2(955.0, 78.0);
+        let close_frames = [
+            egui::RawInput {
+                screen_rect: Some(screen),
+                time: Some(2.0),
+                focused: true,
+                events: vec![egui::Event::PointerMoved(close)],
+                ..Default::default()
+            },
+            egui::RawInput {
+                screen_rect: Some(screen),
+                time: Some(2.5),
+                focused: true,
+                events: vec![egui::Event::PointerButton {
+                    pos: close,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                }],
+                ..Default::default()
+            },
+            egui::RawInput {
+                screen_rect: Some(screen),
+                time: Some(2.7),
+                focused: true,
+                events: vec![egui::Event::PointerButton {
+                    pos: close,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Default::default(),
+                }],
+                ..Default::default()
+            },
+        ];
+        for frame in close_frames {
+            run_frame(&ctx, &mut app, frame, screen);
+        }
+        assert!(!app.settings_open, "settings close button did not receive the click");
+    }
+}
+
