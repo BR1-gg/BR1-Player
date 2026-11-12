@@ -146,6 +146,8 @@ pub struct PlayerApp {
     add_menu_open: bool,
     add_menu_pos: egui::Pos2,
     add_menu_rect: Rect,
+    add_menu_ignore_click: bool,
+    plus_rect: Option<Rect>,
     search_query: String,
     search_active: bool,
     search_focus_request: bool,
@@ -233,6 +235,8 @@ impl PlayerApp {
             add_menu_open: false,
             add_menu_pos: egui::Pos2::ZERO,
             add_menu_rect: Rect::NOTHING,
+            add_menu_ignore_click: false,
+            plus_rect: None,
             search_query: String::new(),
             search_active: false,
             search_focus_request: false,
@@ -1117,6 +1121,7 @@ impl PlayerApp {
             pos2(rect.left() + margin + side * 0.5, cy),
             vec2(side, side),
         );
+        self.plus_rect = Some(plus_rect);
         let settings_rect = Rect::from_center_size(
             pos2(rect.right() - margin - side * 0.5, cy),
             vec2(side, side),
@@ -1159,6 +1164,9 @@ impl PlayerApp {
                 self.layout_edit = true;
                 self.add_menu_pos = plus_rect.left_bottom() + vec2(0.0, 8.0);
                 self.settings_open = false;
+                // The click that opened the menu must not close it again on the
+                // same frame, otherwise it only flashes on screen.
+                self.add_menu_ignore_click = true;
             }
         }
 
@@ -3083,6 +3091,7 @@ impl PlayerApp {
 
     fn add_menu(&mut self, ctx: &egui::Context) {
         if !self.add_menu_open {
+            self.add_menu_ignore_click = false;
             return;
         }
         let theme = self.theme;
@@ -3162,15 +3171,17 @@ impl PlayerApp {
                 );
                 self.add_menu_rect = menu.response.rect;
 
-                let outside_click = ui.ctx().input(|input| input.pointer.any_click())
-                    && ui
-                        .ctx()
-                        .input(|input| input.pointer.interact_pos())
-                        .map(|pos| !self.add_menu_rect.contains(pos))
-                        .unwrap_or(false);
-                if outside_click {
+                let clicked = ui.ctx().input(|input| input.pointer.any_click());
+                let pointer = ui.ctx().input(|input| input.pointer.interact_pos());
+                if menu_should_close(
+                    self.add_menu_ignore_click,
+                    clicked,
+                    pointer,
+                    self.add_menu_rect,
+                ) {
                     self.add_menu_open = false;
                 }
+                self.add_menu_ignore_click = false;
             });
 
         match action {
@@ -5036,6 +5047,21 @@ fn configure_style(ctx: &egui::Context, theme: &Theme) {
     ctx.set_style_of(egui::Theme::Light, style);
 }
 
+fn menu_should_close(
+    ignore_click: bool,
+    clicked: bool,
+    pointer: Option<egui::Pos2>,
+    rect: Rect,
+) -> bool {
+    if ignore_click || !clicked {
+        return false;
+    }
+    match pointer {
+        Some(pos) => !rect.contains(pos),
+        None => false,
+    }
+}
+
 #[cfg(test)]
 mod glass_click_tests {
     use super::*;
@@ -5141,5 +5167,80 @@ mod glass_click_tests {
         }
         assert!(!app.settings_open, "settings close button did not receive the click");
     }
-}
 
+    fn frame_input(screen: Rect, time: f64, events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(screen),
+            time: Some(time),
+            focused: true,
+            events,
+            ..Default::default()
+        }
+    }
+
+    fn click(
+        ctx: &egui::Context,
+        app: &mut PlayerApp,
+        screen: Rect,
+        pos: egui::Pos2,
+        time: f64,
+    ) {
+        let frames = [
+            frame_input(screen, time, vec![egui::Event::PointerMoved(pos)]),
+            frame_input(
+                screen,
+                time + 0.05,
+                vec![egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                }],
+            ),
+            frame_input(
+                screen,
+                time + 0.1,
+                vec![egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Default::default(),
+                }],
+            ),
+        ];
+        for frame in frames {
+            run_frame(ctx, app, frame, screen);
+        }
+    }
+
+    #[test]
+    fn component_menu_stays_open_after_the_opening_click() {
+        let ctx = egui::Context::default();
+        let mut app = PlayerApp::new(&ctx, Vec::new(), false, false, None, false);
+        app.view = View::Dashboard;
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(1180.0, 760.0));
+
+        // Let the top bar lay out once so we know where the + button is.
+        run_frame(&ctx, &mut app, frame_input(screen, 0.4, Vec::new()), screen);
+        let plus = app.plus_rect.expect("plus button rect").center();
+
+        click(&ctx, &mut app, screen, plus, 1.0);
+        assert!(app.add_menu_open, "the + button should open the menu");
+        assert!(app.layout_edit, "opening the menu enters layout mode");
+
+        // Idle frames must not close it (this is the reported bug).
+        for step in 0..5 {
+            run_frame(
+                &ctx,
+                &mut app,
+                frame_input(screen, 2.0 + step as f64 * 0.1, Vec::new()),
+                screen,
+            );
+        }
+        assert!(app.add_menu_open, "the menu closed by itself");
+
+        // Clicking outside the menu closes it.
+        click(&ctx, &mut app, screen, pos2(900.0, 700.0), 3.0);
+        assert!(!app.add_menu_open, "outside click should close the menu");
+    }
+}
