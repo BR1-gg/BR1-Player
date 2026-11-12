@@ -1,119 +1,9 @@
 use eframe::egui::{
     self, pos2, vec2, Align2, Color32, CornerRadius, CursorIcon, FontId, Painter, Rect, Response,
-    Sense, Shape, Stroke, TextureHandle, Ui, Vec2,
+    Sense, Shape, Stroke, TextureHandle, Ui,
 };
 
-/* ---------- palette ---------- */
-
-pub const BG: Color32 = Color32::from_rgb(11, 11, 15);
-pub const PANEL: Color32 = Color32::from_rgb(17, 17, 24);
-pub const PANEL_SOFT: Color32 = Color32::from_rgb(22, 22, 31);
-pub const PANEL_HOVER: Color32 = Color32::from_rgb(29, 29, 40);
-pub const LINE: Color32 = Color32::from_rgba_premultiplied(18, 18, 18, 18);
-pub const TEXT: Color32 = Color32::from_rgb(236, 236, 243);
-pub const MUTED: Color32 = Color32::from_rgb(139, 139, 158);
-pub const ACCENT: Color32 = Color32::from_rgb(124, 92, 255);
-pub const ACCENT_BRIGHT: Color32 = Color32::from_rgb(140, 111, 255);
-pub const ACCENT_SOFT: Color32 = Color32::from_rgba_premultiplied(21, 16, 44, 44);
-pub const NOTE: Color32 = Color32::from_rgb(167, 148, 255);
-pub const DANGER: Color32 = Color32::from_rgb(255, 128, 128);
-pub const ON_ACCENT: Color32 = Color32::WHITE;
-
-pub const COVER_FALLBACK: Color32 = Color32::from_rgb(28, 24, 44);
-
-/* ---------- covers ---------- */
-
-pub fn paint_cover(ui: &Ui, rect: Rect, texture: Option<&TextureHandle>, radius: f32) {
-    match texture {
-        Some(texture) => {
-            egui::Image::new(egui::load::SizedTexture::from_handle(texture))
-                .corner_radius(radius)
-                .uv(cover_uv(texture.size_vec2(), rect.size()))
-                .paint_at(ui, rect);
-        }
-        None => placeholder_cover(ui.painter(), rect, radius),
-    }
-}
-
-/// UV window that fills `target` while keeping the image's aspect ratio
-/// (centre-cropped, never stretched).
-fn cover_uv(texture: Vec2, target: Vec2) -> Rect {
-    let full = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-
-    if texture.x <= 0.0 || texture.y <= 0.0 || target.x <= 0.0 || target.y <= 0.0 {
-        return full;
-    }
-
-    let texture_aspect = texture.x / texture.y;
-    let target_aspect = target.x / target.y;
-    if (texture_aspect - target_aspect).abs() < 0.001 {
-        return full;
-    }
-
-    let mut uv = full;
-    if texture_aspect > target_aspect {
-        // Wider than the box: keep the full height, crop the sides.
-        let width = target_aspect / texture_aspect;
-        let pad = (1.0 - width) * 0.5;
-        uv.min.x = pad;
-        uv.max.x = 1.0 - pad;
-    } else {
-        let height = texture_aspect / target_aspect;
-        let pad = (1.0 - height) * 0.5;
-        uv.min.y = pad;
-        uv.max.y = 1.0 - pad;
-    }
-
-    uv
-}
-
-pub fn placeholder_cover(painter: &Painter, rect: Rect, radius: f32) {
-    painter.rect_filled(rect, radius, COVER_FALLBACK);
-
-    let size = rect.width().min(rect.height());
-    painter.circle_filled(
-        rect.center() - vec2(0.0, size * 0.06),
-        size * 0.30,
-        Color32::from_rgba_unmultiplied(124, 92, 255, 30),
-    );
-
-    paint_note(painter, rect, NOTE);
-}
-
-fn paint_note(painter: &Painter, rect: Rect, color: Color32) {
-    let size = rect.width().min(rect.height());
-    let center = rect.center();
-    let head = size * 0.058;
-    let stem = size * 0.024;
-    let left = pos2(center.x - size * 0.095, center.y + size * 0.105);
-    let right = pos2(center.x + size * 0.105, center.y + size * 0.035);
-    let top = center.y - size * 0.255;
-
-    painter.circle_filled(left, head, color);
-    painter.circle_filled(right, head, color);
-
-    let left_stem = Rect::from_min_size(
-        pos2(left.x + head * 0.72, top),
-        vec2(stem, left.y - top - head * 0.35),
-    );
-    let right_stem = Rect::from_min_size(
-        pos2(right.x + head * 0.72, top + size * 0.035),
-        vec2(stem, right.y - top - size * 0.035 - head * 0.35),
-    );
-    painter.rect_filled(left_stem, stem * 0.5, color);
-    painter.rect_filled(right_stem, stem * 0.5, color);
-
-    painter.rect_filled(
-        Rect::from_min_size(
-            pos2(left.x + head * 0.72, top),
-            vec2(right.x - left.x, size * 0.042),
-        ),
-        size * 0.01,
-        color,
-    );
-}
-
-/* ---------- glyphs ---------- */
+use crate::theme::{self, with_alpha, Theme};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Glyph {
@@ -121,9 +11,71 @@ pub enum Glyph {
     Play,
     Pause,
     Next,
+    Search,
+    Plus,
+    Close,
+    Sliders,
+    Volume,
+    Mute,
+    Note,
+    Download,
+    Folder,
+    Music,
 }
 
-fn paint_glyph(painter: &Painter, center: egui::Pos2, scale: f32, glyph: Glyph, color: Color32) {
+/* ---------- covers ---------- */
+
+pub fn paint_cover(
+    ui: &Ui,
+    rect: Rect,
+    texture: Option<&TextureHandle>,
+    radius: f32,
+    theme: &Theme,
+) {
+    match texture {
+        Some(texture) => {
+            egui::Image::new(egui::load::SizedTexture::from_handle(texture))
+                .corner_radius(radius)
+                .uv(theme::texture_uv(texture.size_vec2(), rect.size()))
+                .paint_at(ui, rect);
+        }
+        None => placeholder_cover(ui.painter(), rect, radius, theme),
+    }
+}
+
+pub fn placeholder_cover(painter: &Painter, rect: Rect, radius: f32, theme: &Theme) {
+    theme::gradient_rect(
+        painter,
+        rect,
+        radius,
+        theme::lerp_color(Color32::from_rgb(26, 24, 38), theme.accent_a, 0.22),
+        theme::lerp_color(Color32::from_rgb(13, 13, 19), theme.accent_b, 0.12),
+        theme.angle,
+    );
+    let size = rect.width().min(rect.height());
+    painter.circle_filled(
+        rect.center() - vec2(0.0, size * 0.05),
+        size * 0.28,
+        with_alpha(theme.accent_a, 34),
+    );
+    paint_glyph(
+        painter,
+        rect.center(),
+        size * 0.46,
+        Glyph::Note,
+        with_alpha(theme.accent_b, 210),
+    );
+}
+
+/* ---------- glyphs ---------- */
+
+pub fn paint_glyph(
+    painter: &Painter,
+    center: egui::Pos2,
+    scale: f32,
+    glyph: Glyph,
+    color: Color32,
+) {
     let s = scale * 0.33;
     let fill = Stroke::NONE;
 
@@ -131,9 +83,9 @@ fn paint_glyph(painter: &Painter, center: egui::Pos2, scale: f32, glyph: Glyph, 
         Glyph::Play => {
             painter.add(Shape::convex_polygon(
                 vec![
-                    center + vec2(-s * 0.55, -s * 0.95),
-                    center + vec2(-s * 0.55, s * 0.95),
-                    center + vec2(s * 0.95, 0.0),
+                    center + vec2(-s * 0.5, -s * 0.95),
+                    center + vec2(-s * 0.5, s * 0.95),
+                    center + vec2(s * 1.0, 0.0),
                 ],
                 color,
                 fill,
@@ -153,7 +105,7 @@ fn paint_glyph(painter: &Painter, center: egui::Pos2, scale: f32, glyph: Glyph, 
             );
         }
         Glyph::Prev | Glyph::Next => {
-            let dir = if glyph == Glyph::Prev { -1.0 } else { 1.0 };
+            let dir = if glyph == Glyph::Prev { 1.0 } else { -1.0 };
             let bar_center = center - vec2(s * 0.78 * dir, 0.0);
             painter.rect_filled(
                 Rect::from_center_size(bar_center, vec2(s * 0.28, s * 1.8)),
@@ -170,8 +122,172 @@ fn paint_glyph(painter: &Painter, center: egui::Pos2, scale: f32, glyph: Glyph, 
                 fill,
             ));
         }
+        Glyph::Search => {
+            painter.circle_stroke(
+                center - vec2(s * 0.16, s * 0.16),
+                s * 0.72,
+                Stroke::new(s * 0.22, color),
+            );
+            painter.line_segment(
+                [
+                    center + vec2(s * 0.36, s * 0.36),
+                    center + vec2(s * 0.98, s * 0.98),
+                ],
+                Stroke::new(s * 0.24, color),
+            );
+        }
+        Glyph::Plus => {
+            painter.line_segment(
+                [center - vec2(s * 0.75, 0.0), center + vec2(s * 0.75, 0.0)],
+                Stroke::new(s * 0.24, color),
+            );
+            painter.line_segment(
+                [center - vec2(0.0, s * 0.75), center + vec2(0.0, s * 0.75)],
+                Stroke::new(s * 0.24, color),
+            );
+        }
+        Glyph::Close => {
+            painter.line_segment(
+                [
+                    center - vec2(s * 0.62, s * 0.62),
+                    center + vec2(s * 0.62, s * 0.62),
+                ],
+                Stroke::new(s * 0.22, color),
+            );
+            painter.line_segment(
+                [
+                    center + vec2(s * 0.62, -s * 0.62),
+                    center + vec2(-s * 0.62, s * 0.62),
+                ],
+                Stroke::new(s * 0.22, color),
+            );
+        }
+        Glyph::Sliders => {
+            for (index, offset) in [(-0.62f32, -0.28f32), (0.0, 0.30), (0.62, -0.05)] {
+                let y = center.y + s * offset;
+                painter.line_segment(
+                    [pos2(center.x - s * 0.92, y), pos2(center.x + s * 0.92, y)],
+                    Stroke::new(s * 0.16, color),
+                );
+                painter.circle_filled(pos2(center.x + s * index, y), s * 0.22, color);
+            }
+        }
+        Glyph::Volume | Glyph::Mute => {
+            painter.add(Shape::convex_polygon(
+                vec![
+                    center + vec2(-s * 0.9, -s * 0.3),
+                    center + vec2(-s * 0.4, -s * 0.3),
+                    center + vec2(s * 0.15, -s * 0.8),
+                    center + vec2(s * 0.15, s * 0.8),
+                    center + vec2(-s * 0.4, s * 0.3),
+                    center + vec2(-s * 0.9, s * 0.3),
+                ],
+                color,
+                fill,
+            ));
+            if glyph == Glyph::Volume {
+                painter.circle_stroke(
+                    center + vec2(s * 0.25, 0.0),
+                    s * 0.55,
+                    Stroke::new(s * 0.14, color),
+                );
+                painter.circle_stroke(
+                    center + vec2(s * 0.25, 0.0),
+                    s * 0.95,
+                    Stroke::new(s * 0.14, color),
+                );
+            } else {
+                painter.line_segment(
+                    [
+                        center + vec2(s * 0.35, -s * 0.45),
+                        center + vec2(s * 0.95, s * 0.45),
+                    ],
+                    Stroke::new(s * 0.16, color),
+                );
+                painter.line_segment(
+                    [
+                        center + vec2(s * 0.95, -s * 0.45),
+                        center + vec2(s * 0.35, s * 0.45),
+                    ],
+                    Stroke::new(s * 0.16, color),
+                );
+            }
+        }
+        Glyph::Note | Glyph::Music => {
+            let head = s * 0.30;
+            let left = center + vec2(-s * 0.5, s * 0.55);
+            let right = center + vec2(s * 0.55, s * 0.20);
+            painter.circle_filled(left, head, color);
+            painter.circle_filled(right, head, color);
+            painter.rect_filled(
+                Rect::from_min_size(
+                    pos2(left.x + head * 0.7, center.y - s * 1.25),
+                    vec2(s * 0.16, left.y - center.y + s * 1.25 - head * 0.4),
+                ),
+                0.0,
+                color,
+            );
+            painter.rect_filled(
+                Rect::from_min_size(
+                    pos2(right.x + head * 0.7, center.y - s * 0.85),
+                    vec2(s * 0.16, right.y - center.y + s * 0.85 - head * 0.4),
+                ),
+                0.0,
+                color,
+            );
+            painter.rect_filled(
+                Rect::from_min_size(
+                    pos2(left.x + head * 0.7, center.y - s * 1.25),
+                    vec2(right.x - left.x, s * 0.18),
+                ),
+                0.0,
+                color,
+            );
+        }
+        Glyph::Download => {
+            painter.line_segment(
+                [center - vec2(0.0, s * 0.85), center + vec2(0.0, s * 0.25)],
+                Stroke::new(s * 0.20, color),
+            );
+            painter.add(Shape::convex_polygon(
+                vec![
+                    center + vec2(-s * 0.42, s * 0.05),
+                    center + vec2(s * 0.42, s * 0.05),
+                    center + vec2(0.0, s * 0.62),
+                ],
+                color,
+                fill,
+            ));
+            painter.line_segment(
+                [
+                    center + vec2(-s * 0.78, s * 0.85),
+                    center + vec2(s * 0.78, s * 0.85),
+                ],
+                Stroke::new(s * 0.20, color),
+            );
+        }
+        Glyph::Folder => {
+            painter.rect_filled(
+                Rect::from_min_max(
+                    center + vec2(-s * 0.9, -s * 0.55),
+                    center + vec2(-s * 0.1, -s * 0.25),
+                ),
+                0.0,
+                color,
+            );
+            painter.rect_filled(
+                Rect::from_min_max(
+                    center + vec2(-s * 0.9, -s * 0.35),
+                    center + vec2(s * 0.9, s * 0.6),
+                ),
+                s * 0.12,
+                color,
+            );
+        }
     }
 }
+
+/* ---------- buttons ---------- */
 
 pub fn glyph_button(
     ui: &Ui,
@@ -179,6 +295,7 @@ pub fn glyph_button(
     id: &str,
     glyph: Glyph,
     filled: bool,
+    theme: &Theme,
 ) -> Response {
     let response = ui
         .interact(rect, ui.id().with(id), Sense::click())
@@ -187,127 +304,117 @@ pub fn glyph_button(
 
     let background = if filled {
         if response.hovered() {
-            Color32::from_rgb(245, 245, 250)
+            theme::lerp_color(theme.accent_a, Color32::WHITE, 0.14)
         } else {
-            Color32::WHITE
+            theme.accent_a
         }
     } else if response.hovered() {
-        Color32::from_rgba_unmultiplied(255, 255, 255, 18)
+        Color32::from_rgba_unmultiplied(255, 255, 255, 20)
     } else {
         Color32::TRANSPARENT
     };
 
     painter.circle_filled(rect.center(), rect.width() * 0.5, background);
+    if filled {
+        painter.circle_stroke(
+            rect.center(),
+            rect.width() * 0.5,
+            Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 60)),
+        );
+    }
     paint_glyph(
         painter,
         rect.center(),
         rect.width(),
         glyph,
-        if filled { BG } else { TEXT },
+        if filled {
+            theme.on_accent()
+        } else {
+            theme.text()
+        },
     );
 
     response
 }
 
-/* ---------- controls ---------- */
-
-pub fn pill_button(ui: &mut Ui, label: &str, primary: bool) -> Response {
-    let width = ui.available_width();
-    pill_button_sized(ui, width, label, primary)
+pub fn circle_button(ui: &Ui, rect: Rect, id: &str, glyph: Glyph, theme: &Theme) -> Response {
+    let response = ui
+        .interact(rect, ui.id().with(id), Sense::click())
+        .on_hover_cursor(CursorIcon::PointingHand);
+    theme::paint_icon_button(ui.painter(), rect, theme, response.hovered(), false);
+    paint_glyph(
+        ui.painter(),
+        rect.center(),
+        rect.width() * 0.9,
+        glyph,
+        theme.text(),
+    );
+    response
 }
 
-pub fn pill_button_sized(ui: &mut Ui, width: f32, label: &str, primary: bool) -> Response {
+pub fn pill_button_sized(
+    ui: &mut Ui,
+    width: f32,
+    label: &str,
+    primary: bool,
+    theme: &Theme,
+) -> Response {
     let (rect, response) = ui.allocate_exact_size(vec2(width, 38.0), Sense::click());
     let painter = ui.painter();
-
-    let background = if primary {
-        if response.hovered() {
-            ACCENT_BRIGHT
-        } else {
-            ACCENT
-        }
-    } else if response.hovered() {
-        PANEL_HOVER
-    } else {
-        PANEL_SOFT
-    };
-
-    painter.rect_filled(rect, CornerRadius::from(10.0), background);
+    theme::paint_pill(painter, rect, theme, response.hovered(), false, primary);
     painter.text(
         rect.center(),
         Align2::CENTER_CENTER,
         label,
-        FontId::proportional(13.0),
+        FontId::proportional(12.5),
         if primary {
-            ON_ACCENT
-        } else if response.hovered() {
-            TEXT
+            theme.on_accent()
         } else {
-            MUTED
+            theme.text()
         },
     );
-
     response.on_hover_cursor(CursorIcon::PointingHand)
 }
 
-pub fn nav_item(ui: &mut Ui, label: &str, active: bool) -> Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 38.0), Sense::click());
+pub fn chip_button(ui: &mut Ui, label: &str, active: bool, width: f32, theme: &Theme) -> Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(width, 26.0), Sense::click());
     let painter = ui.painter();
-
-    if active || response.hovered() {
-        painter.rect_filled(
-            rect,
-            CornerRadius::from(10.0),
-            if active { PANEL_SOFT } else { PANEL_HOVER },
-        );
-    }
-
-    painter.circle_filled(pos2(rect.left() + 18.0, rect.center().y), 3.0, ACCENT);
+    theme::paint_pill(painter, rect, theme, response.hovered(), active, false);
     painter.text(
-        pos2(rect.left() + 32.0, rect.center().y),
-        Align2::LEFT_CENTER,
+        rect.center(),
+        Align2::CENTER_CENTER,
         label,
-        FontId::proportional(13.5),
-        if active { TEXT } else { MUTED },
+        FontId::proportional(11.0),
+        if active { theme.text() } else { theme.muted() },
     );
-
     response.on_hover_cursor(CursorIcon::PointingHand)
 }
 
-pub fn chip(ui: &Ui, rect: Rect, id: &str, label: &str, active: bool) -> Response {
+pub fn chip(ui: &Ui, rect: Rect, id: &str, label: &str, active: bool, theme: &Theme) -> Response {
     let response = ui
         .interact(rect, ui.id().with(id), Sense::click())
         .on_hover_cursor(CursorIcon::PointingHand);
     let painter = ui.painter();
-
-    let background = if active {
-        ACCENT_SOFT
-    } else if response.hovered() {
-        PANEL_HOVER
-    } else {
-        Color32::TRANSPARENT
-    };
-
-    painter.rect_filled(rect, CornerRadius::from(rect.height() * 0.5), background);
+    theme::paint_pill(painter, rect, theme, response.hovered(), active, false);
     painter.text(
         rect.center(),
         Align2::CENTER_CENTER,
         label,
-        FontId::proportional(11.5),
-        if active {
-            NOTE
-        } else if response.hovered() {
-            TEXT
-        } else {
-            MUTED
-        },
+        FontId::proportional(11.0),
+        if active { theme.text() } else { theme.muted() },
     );
-
     response
 }
 
 /// Flat progress/volume slider. Returns the requested fraction when the user clicks or drags.
-pub fn slider(ui: &Ui, rect: Rect, id: &str, fraction: f32, enabled: bool) -> (Response, Option<f32>) {
+pub fn slider(
+    ui: &Ui,
+    rect: Rect,
+    id: &str,
+    fraction: f32,
+    enabled: bool,
+    theme: &Theme,
+) -> (Response, Option<f32>) {
     let response = if enabled {
         ui.interact(rect, ui.id().with(id), Sense::click_and_drag())
     } else {
@@ -318,10 +425,24 @@ pub fn slider(ui: &Ui, rect: Rect, id: &str, fraction: f32, enabled: bool) -> (R
     let track = Rect::from_center_size(rect.center(), vec2(rect.width(), 4.0));
     let fraction = fraction.clamp(0.0, 1.0);
 
-    painter.rect_filled(track, CornerRadius::from(2.0), Color32::from_rgba_unmultiplied(255, 255, 255, 30));
+    painter.rect_filled(
+        track,
+        2.0,
+        Color32::from_rgba_unmultiplied(255, 255, 255, 26),
+    );
 
-    let filled = Rect::from_min_max(track.min, pos2(track.left() + track.width() * fraction, track.max.y));
-    painter.rect_filled(filled, CornerRadius::from(2.0), if enabled { ACCENT } else { MUTED });
+    let filled = Rect::from_min_max(
+        track.min,
+        pos2(track.left() + track.width() * fraction, track.max.y),
+    );
+    theme::gradient_rect(
+        painter,
+        filled,
+        2.0,
+        theme.accent_a,
+        theme.accent_b,
+        theme.angle,
+    );
 
     if enabled && (response.hovered() || response.dragged()) {
         painter.circle_filled(pos2(filled.right(), track.center().y), 5.5, Color32::WHITE);
@@ -337,6 +458,8 @@ pub fn slider(ui: &Ui, rect: Rect, id: &str, fraction: f32, enabled: bool) -> (R
 
     (response, requested)
 }
+
+/* ---------- text/feedback ---------- */
 
 /// Shortens `text` with an ellipsis so it fits `max_width` points.
 pub fn ellipsize(
@@ -384,37 +507,6 @@ pub fn ellipsize(
     output
 }
 
-/// Space-allocating chip button (settings toggles, small actions).
-pub fn chip_button(ui: &mut Ui, label: &str, active: bool, width: f32) -> Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(width, 26.0), Sense::click());
-    let painter = ui.painter();
-
-    let background = if active {
-        ACCENT_SOFT
-    } else if response.hovered() {
-        PANEL_HOVER
-    } else {
-        PANEL_SOFT
-    };
-
-    painter.rect_filled(rect, CornerRadius::from(rect.height() * 0.5), background);
-    painter.text(
-        rect.center(),
-        Align2::CENTER_CENTER,
-        label,
-        FontId::proportional(11.0),
-        if active {
-            NOTE
-        } else if response.hovered() {
-            TEXT
-        } else {
-            MUTED
-        },
-    );
-
-    response.on_hover_cursor(CursorIcon::PointingHand)
-}
-
 /// Thin progress bar. `None` fraction draws a moving segment (unknown size).
 pub fn progress_bar(
     painter: &Painter,
@@ -422,22 +514,26 @@ pub fn progress_bar(
     fraction: Option<f32>,
     color: Color32,
     time: f64,
+    theme: &Theme,
 ) {
     let radius = CornerRadius::from(rect.height() * 0.5);
     painter.rect_filled(
         rect,
         radius,
-        Color32::from_rgba_unmultiplied(255, 255, 255, 26),
+        Color32::from_rgba_unmultiplied(255, 255, 255, 24),
     );
 
     match fraction {
         Some(value) => {
             let width = rect.width() * value.clamp(0.0, 1.0);
             if width > 0.5 {
-                painter.rect_filled(
+                theme::gradient_rect(
+                    painter,
                     Rect::from_min_size(rect.min, vec2(width, rect.height())),
-                    radius,
+                    rect.height() * 0.5,
                     color,
+                    theme.accent_b,
+                    theme.angle,
                 );
             }
         }
@@ -458,62 +554,47 @@ pub fn progress_bar(
     }
 }
 
-/// A row in the sidebar playlist list.
-pub fn playlist_row(
-    ui: &mut Ui,
-    title: &str,
-    count: usize,
-    texture: Option<&TextureHandle>,
-    active: bool,
-) -> Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 42.0), Sense::click());
+pub fn menu_item(ui: &mut Ui, label: &str, glyph: Glyph, theme: &Theme) -> Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 38.0), Sense::click());
     let painter = ui.painter();
-
-    if active || response.hovered() {
+    if response.hovered() {
         painter.rect_filled(
             rect,
-            CornerRadius::from(10.0),
-            if active { PANEL_SOFT } else { PANEL_HOVER },
+            CornerRadius::from(9.0),
+            Color32::from_rgba_unmultiplied(255, 255, 255, 18),
         );
     }
-
-    let cover = Rect::from_min_size(
-        pos2(rect.left() + 6.0, rect.center().y - 14.0),
-        vec2(28.0, 28.0),
+    paint_glyph(
+        painter,
+        pos2(rect.left() + 20.0, rect.center().y),
+        18.0,
+        glyph,
+        theme.accent_b,
     );
-    paint_cover(ui, cover, texture, 6.0);
-
-    let text_left = cover.right() + 10.0;
-    let font = FontId::proportional(12.5);
-    let color = if active { TEXT } else { MUTED };
-    let max_width = (rect.right() - 30.0 - text_left).max(20.0);
-
     painter.text(
-        pos2(text_left, rect.center().y),
+        pos2(rect.left() + 40.0, rect.center().y),
         Align2::LEFT_CENTER,
-        ellipsize(painter, title, &font, color, max_width),
-        font,
-        color,
+        label,
+        FontId::proportional(13.0),
+        theme.text(),
     );
-    painter.text(
-        pos2(rect.right() - 6.0, rect.center().y),
-        Align2::RIGHT_CENTER,
-        count.to_string(),
-        FontId::proportional(11.0),
-        MUTED,
-    );
-
     response.on_hover_cursor(CursorIcon::PointingHand)
 }
 
-/// Draws a small pill (used for counters and hints).
-pub fn badge(ui: &mut Ui, text: &str) {
-    egui::Frame::NONE
-        .fill(PANEL_SOFT)
-        .stroke(Stroke::new(1.0_f32, LINE))
-        .corner_radius(CornerRadius::from(13.0))
-        .inner_margin(egui::Margin::symmetric(12, 6))
-        .show(ui, |ui| {
-            ui.label(egui::RichText::new(text).size(12.0).color(MUTED));
-        });
+/// Small text with an accent dot, used for "live" and scanning states.
+pub fn status_dot(ui: &Ui, pos: egui::Pos2, label: &str, active: bool, theme: &Theme) {
+    let painter = ui.painter();
+    let color = if active {
+        theme.accent_b
+    } else {
+        theme.muted()
+    };
+    painter.circle_filled(pos, 3.5, color);
+    painter.text(
+        pos + vec2(10.0, 0.0),
+        Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(11.0),
+        color,
+    );
 }

@@ -195,8 +195,7 @@ impl Manager {
 
     /// True once everything finished — the app then rescans the music folder.
     pub fn take_rescan(&mut self) -> bool {
-        let idle = self.running.is_empty()
-            && !self.jobs.iter().any(|job| job.state.is_active());
+        let idle = self.running.is_empty() && !self.jobs.iter().any(|job| job.state.is_active());
         if self.rescan_pending && idle {
             self.rescan_pending = false;
             true
@@ -542,7 +541,8 @@ fn run_job(id: u64, handle: Handle, source: Source, resolve: bool, sender: Sende
                     });
                 } else {
                     let error = if !cancelled && code != Some(0) {
-                        last_error.or_else(|| Some(format!("Downloader exited with code {:?}.", code)))
+                        last_error
+                            .or_else(|| Some(format!("Downloader exited with code {:?}.", code)))
                     } else {
                         None
                     };

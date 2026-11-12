@@ -6,7 +6,9 @@ mod config;
 mod download;
 mod library;
 mod queue;
+mod theme;
 mod ui;
+mod visualizer;
 
 use std::path::PathBuf;
 
@@ -35,7 +37,9 @@ fn main() -> eframe::Result<()> {
                 println!();
                 println!("  --play             start playing the first track after loading");
                 println!("  --downloads        open the download page at startup");
-                println!("  --download <url>   open the download page and start downloading a link");
+                println!(
+                    "  --download <url>   open the download page and start downloading a link"
+                );
                 println!("  --help             show this help");
                 return Ok(());
             }

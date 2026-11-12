@@ -92,7 +92,9 @@ pub fn sanitize_folder(name: &str) -> String {
     let mut cleaned: String = name
         .chars()
         .map(|ch| {
-            if matches!(ch, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') || (ch as u32) < 32 {
+            if matches!(ch, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+                || (ch as u32) < 32
+            {
                 '_'
             } else {
                 ch
@@ -102,7 +104,12 @@ pub fn sanitize_folder(name: &str) -> String {
 
     cleaned = cleaned.trim().trim_end_matches('.').trim().to_string();
     if cleaned.chars().count() > 80 {
-        cleaned = cleaned.chars().take(80).collect::<String>().trim_end().to_string();
+        cleaned = cleaned
+            .chars()
+            .take(80)
+            .collect::<String>()
+            .trim_end()
+            .to_string();
     }
     if cleaned.is_empty() {
         cleaned = "Playlist".to_string();
@@ -577,8 +584,14 @@ mod tests {
 
     #[test]
     fn detects_sources() {
-        assert_eq!(detect("https://open.spotify.com/playlist/abc"), Source::Spotify);
-        assert_eq!(detect("https://www.youtube.com/playlist?list=abc"), Source::YouTube);
+        assert_eq!(
+            detect("https://open.spotify.com/playlist/abc"),
+            Source::Spotify
+        );
+        assert_eq!(
+            detect("https://www.youtube.com/playlist?list=abc"),
+            Source::YouTube
+        );
         assert_eq!(detect("https://youtu.be/abc"), Source::YouTube);
         assert_eq!(detect("https://example.com/track.mp3"), Source::Direct);
     }
@@ -586,7 +599,9 @@ mod tests {
     #[test]
     fn playlists_get_a_subfolder_but_single_tracks_do_not() {
         assert!(is_list_url("https://www.youtube.com/playlist?list=PL123"));
-        assert!(is_list_url("https://www.youtube.com/watch?v=abc&list=PL123"));
+        assert!(is_list_url(
+            "https://www.youtube.com/watch?v=abc&list=PL123"
+        ));
         assert!(is_list_url("https://music.youtube.com/playlist?list=OLAK5"));
         assert!(is_list_url("https://open.spotify.com/album/abc"));
         assert!(is_list_url("https://www.youtube.com/@SomeChannel"));
@@ -617,9 +632,10 @@ mod tests {
 
     #[test]
     fn reads_resolve_lines() {
-        let (playlist, url, title) =
-            parse_resolve_line("Popular Music Videos|https://www.youtube.com/watch?v=fOT0BUpITw8|BELLAKEO")
-                .unwrap();
+        let (playlist, url, title) = parse_resolve_line(
+            "Popular Music Videos|https://www.youtube.com/watch?v=fOT0BUpITw8|BELLAKEO",
+        )
+        .unwrap();
         assert_eq!(playlist, "Popular Music Videos");
         assert_eq!(url, "https://www.youtube.com/watch?v=fOT0BUpITw8");
         assert_eq!(title, "BELLAKEO");
