@@ -16,6 +16,7 @@ use crate::library::{self, Track};
 use crate::queue::{self, JobState};
 use crate::theme::{self, Theme};
 use crate::ui::{self, Glyph};
+use crate::video_bg::VideoBackground;
 use crate::visualizer::{self, SPECTRUM_BINS};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -158,6 +159,7 @@ pub struct PlayerApp {
     spectrum: Vec<f32>,
     background_tex: Option<TextureHandle>,
     background_loaded: Option<PathBuf>,
+    video: VideoBackground,
     drop_hovering: bool,
 }
 
@@ -245,6 +247,7 @@ impl PlayerApp {
             spectrum: vec![0.0; SPECTRUM_BINS],
             background_tex: None,
             background_loaded: None,
+            video: VideoBackground::new(),
             drop_hovering: false,
         };
 
@@ -945,8 +948,33 @@ impl PlayerApp {
             .pick_file()
         {
             self.config.ui.background_image = Some(path);
+            self.config.ui.background_video = None;
             self.background_loaded = None;
             self.save_config();
+        }
+    }
+
+    fn choose_background_video(&mut self) {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("Video", &["mp4", "webm", "mkv", "mov", "m4v", "avi"])
+            .set_title("Choose a background video")
+            .pick_file()
+        {
+            self.config.ui.background_video = Some(path);
+            self.config.ui.background_image = None;
+            self.background_loaded = None;
+            self.save_config();
+        }
+    }
+
+    /// Drives the looping video background (decoded by the bundled ffmpeg).
+    fn sync_video(&mut self, ctx: &egui::Context) {
+        let path = self.config.ui.background_video.clone();
+        self.video.sync(path.as_ref(), ctx);
+        self.video.update();
+
+        if self.video.is_running() {
+            ctx.request_repaint();
         }
     }
 
@@ -3847,6 +3875,58 @@ impl PlayerApp {
                 .color(theme.faint()),
             );
         }
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if ui::chip_button(
+                ui,
+                "CHOOSE VIDEO",
+                false,
+                112.0,
+                theme,
+                GlassSlot::SettingsControl,
+            )
+            .clicked()
+            {
+                self.choose_background_video();
+            }
+            if ui::chip_button(
+                ui,
+                "CLEAR",
+                false,
+                60.0,
+                theme,
+                GlassSlot::SettingsControl,
+            )
+            .clicked()
+            {
+                self.config.ui.background_video = None;
+                self.save_config();
+            }
+        });
+        if self.config.ui.background_video.is_some() {
+            ui.label(
+                egui::RichText::new(
+                    "A looping video replaces the photo. It is decoded at 1280x720 with the bundled ffmpeg and dimmed by the slider below.",
+                )
+                .size(9.5)
+                .color(theme.faint()),
+            );
+        }
+        let video_label = self
+            .config
+            .ui
+            .background_video
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "No background video selected".to_string());
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(video_label)
+                    .size(10.0)
+                    .color(theme.faint()),
+            )
+            .truncate(),
+        );
         let label = self
             .config
             .ui
@@ -4531,6 +4611,7 @@ impl PlayerApp {
         self.ensure_textures(ctx);
         self.ensure_playlist_textures(ctx);
         self.ensure_background(ctx);
+        self.sync_video(ctx);
         self.handle_drops(ctx);
         self.update_spectrum(ctx);
 
@@ -4631,7 +4712,7 @@ impl PlayerApp {
                 ui.painter(),
                 frame_rect,
                 &theme,
-                self.background_tex.as_ref(),
+                self.video.texture().or(self.background_tex.as_ref()),
             );
             let content = Self::dashboard_content(frame_rect);
             if self.config.ui.panels[PanelKind::Player.index()].visible {

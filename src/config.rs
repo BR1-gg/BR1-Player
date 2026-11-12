@@ -405,7 +405,9 @@ pub struct UiConfig {
     pub background_color: [u8; 3],
     /// Optional photo on top of the inner dashboard background.
     pub background_image: Option<PathBuf>,
-    /// How much the background photo is darkened (0..1).
+    /// Optional looping video on top of the inner dashboard background.
+    pub background_video: Option<PathBuf>,
+    /// How much the background photo/video is darkened (0..1).
     pub background_dim: f32,
     pub panels: [PanelRect; PANEL_COUNT],
     pub eq_enabled: bool,
@@ -436,6 +438,7 @@ impl Default for UiConfig {
             panel_border_width: 1.0,
             background_color: [16, 16, 22],
             background_image: None,
+            background_video: None,
             background_dim: 0.55,
             panels: [
                 // Current playlist (left)
@@ -671,6 +674,13 @@ pub fn load_from(path: &Path) -> Option<Config> {
                     Some(PathBuf::from(value))
                 };
             }
+            "ui_background_video" => {
+                ui.background_video = if value.is_empty() {
+                    None
+                } else {
+                    Some(PathBuf::from(value))
+                };
+            }
             "ui_background_dim" => {
                 if let Ok(parsed) = value.parse::<f32>() {
                     ui.background_dim = parsed.clamp(0.0, 1.0);
@@ -817,6 +827,7 @@ pub fn save_to(path: &Path, config: &Config) {
          ui_panel_border_width={:.2}\n\
          ui_background_color=#{:02X}{:02X}{:02X}\n\
          ui_background_image={}\n\
+         ui_background_video={}\n\
          ui_background_dim={:.3}\n\
          eq_enabled={}\n\
          eq_gains={}\n\
@@ -848,6 +859,10 @@ pub fn save_to(path: &Path, config: &Config) {
         ui.background_color[1],
         ui.background_color[2],
         ui.background_image
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default(),
+        ui.background_video
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_default(),

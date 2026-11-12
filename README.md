@@ -37,6 +37,9 @@ is independently themeable from **Settings → Appearance**:
   component content automatically insets itself as borders get thicker
 - an inner background colour plus an optional photo on top of it, with a dim
   slider
+- an optional **looping video background**: pick any mp4/webm/mkv/mov, it is
+  decoded at 1280x720 with the bundled ffmpeg (no extra dependencies), fills the
+  inner dashboard and shares the same dim slider as the photo
 - presets (Aurora, Sunset, Ocean, Ember, Mono, Neon, Forest, Royal)
 
 The settings are saved to `config.txt`.

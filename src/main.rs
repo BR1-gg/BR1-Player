@@ -10,6 +10,7 @@ mod queue;
 mod theme;
 mod ui;
 mod visualizer;
+mod video_bg;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
