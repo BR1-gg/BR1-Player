@@ -1,0 +1,10 @@
+# Rust build output
+/target/
+
+# Bundled downloader tools (yt-dlp, spotdl, ffmpeg + DLLs — 250 MB, over GitHub's
+# file size limit). Install them into ./bin as described in the README.
+/bin/
+
+# Prebuilt binaries
+/Def Player.exe
+*.exe

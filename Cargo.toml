@@ -1,0 +1,16 @@
+[package]
+name = "def_player"
+version = "0.1.0"
+edition = "2021"
+description = "Simple desktop music player"
+
+[dependencies]
+eframe = "0.31.1"
+egui = "0.31.1"
+rodio = "0.20.1"
+lofty = "0.22.4"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "bmp", "webp"] }
+rfd = "0.15.4"
+
+[profile.release]
+opt-level = 2
