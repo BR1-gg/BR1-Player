@@ -8,14 +8,16 @@
 //! calibrated tone fills. The material and appearance knobs all drive the
 //! painter; `merge_spacing` is reserved for grouped glass.
 
-use eframe::egui::{pos2, vec2, Color32, Mesh, Painter, Pos2, Rect, Shape, Stroke};
+use std::cell::RefCell;
+
+use egui::{pos2, vec2, Color32, Mesh, Painter, Pos2, Rect, Shape, Stroke};
 
 use crate::config::{GlassConfig, GlassShape, GlassTone};
 use crate::theme::{self, Theme};
 
 /// Where a glass surface is being painted. Each slot maps to one target
 /// checkbox in Settings.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum GlassSlot {
     None,
     TopBar,
@@ -29,6 +31,113 @@ pub enum GlassSlot {
     Slider,
     SettingsControl,
     Setup,
+}
+
+/// Outline passed to the real wgpu renderer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GlassShapeSpec {
+    Capsule,
+    Rounded(f32),
+    Circular(f32),
+    Smooth { radius: f32, smoothing: f32 },
+}
+
+/// One glass surface collected while egui paints. The wgpu loop turns these
+/// into `liquid_rust::Glass` each frame.
+#[derive(Clone, Copy, Debug)]
+pub struct GlassSpec {
+    pub rect: Rect,
+    pub shape: GlassShapeSpec,
+    pub style: GlassConfig,
+    pub slot: GlassSlot,
+    pub primary: bool,
+    pub active: bool,
+    pub hovered: bool,
+    pub z: i32,
+    pub interactive: bool,
+    pub container: Option<u64>,
+    pub spacing: f32,
+    pub accent_a: Color32,
+    pub accent_b: Color32,
+}
+
+thread_local! {
+    static SPECS: RefCell<Vec<GlassSpec>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Clear the per-frame glass list before running egui.
+pub fn begin_frame() {
+    SPECS.with(|specs| specs.borrow_mut().clear());
+}
+
+/// Take the glass surfaces recorded during the egui pass.
+pub fn take_specs() -> Vec<GlassSpec> {
+    SPECS.with(|specs| std::mem::take(&mut *specs.borrow_mut()))
+}
+
+fn slot_z(slot: GlassSlot) -> i32 {
+    match slot {
+        GlassSlot::Panel => 0,
+        GlassSlot::ListRow => 1,
+        GlassSlot::Menu => 6,
+        GlassSlot::SettingsControl => 5,
+        _ => 2,
+    }
+}
+
+fn slot_container(slot: GlassSlot) -> Option<u64> {
+    match slot {
+        GlassSlot::Transport => Some(1),
+        GlassSlot::PlayerChip => Some(2),
+        GlassSlot::DownloaderAction => Some(3),
+        GlassSlot::OptionChip => Some(4),
+        _ => None,
+    }
+}
+
+fn shape_spec(style: &GlassConfig) -> GlassShapeSpec {
+    match style.shape {
+        GlassShape::Capsule => GlassShapeSpec::Capsule,
+        GlassShape::Rounded => GlassShapeSpec::Rounded(style.shape_radius),
+        GlassShape::Circular => GlassShapeSpec::Circular(style.shape_radius),
+        GlassShape::Smooth => GlassShapeSpec::Smooth {
+            radius: style.shape_radius,
+            smoothing: style.smoothing,
+        },
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record(
+    theme: &Theme,
+    rect: Rect,
+    shape: GlassShapeSpec,
+    slot: GlassSlot,
+    primary: bool,
+    active: bool,
+    hovered: bool,
+    z: Option<i32>,
+    interactive: bool,
+) {
+    if !theme.real_glass || !enabled(theme, slot) {
+        return;
+    }
+    let spec = GlassSpec {
+        rect,
+        shape,
+        style: theme.liquid,
+        slot,
+        primary,
+        active,
+        hovered,
+        z: z.unwrap_or_else(|| slot_z(slot)),
+        interactive,
+        container: slot_container(slot),
+        spacing: theme.liquid.merge_spacing,
+        accent_a: theme.accent_a,
+        accent_b: theme.accent_b,
+    };
+    SPECS.with(|specs| specs.borrow_mut().push(spec));
 }
 
 pub fn enabled(theme: &Theme, slot: GlassSlot) -> bool {
@@ -734,6 +843,20 @@ pub fn paint_button(
     if !enabled(theme, slot) || rect.width() < 2.0 || rect.height() < 2.0 {
         return false;
     }
+    if theme.real_glass && slot != GlassSlot::Menu {
+        record(
+            theme,
+            rect,
+            shape_spec(&theme.liquid),
+            slot,
+            primary,
+            active,
+            hovered,
+            None,
+            true,
+        );
+        return true;
+    }
     let shrink = if pressed && theme.liquid.physics {
         0.8
     } else {
@@ -771,9 +894,24 @@ pub fn paint_panel(
     radius: f32,
     theme: &Theme,
     hovered: bool,
+    z: i32,
 ) -> bool {
     if !enabled(theme, GlassSlot::Panel) || rect.width() < 8.0 || rect.height() < 8.0 {
         return false;
+    }
+    if theme.real_glass {
+        record(
+            theme,
+            rect,
+            GlassShapeSpec::Rounded(radius),
+            GlassSlot::Panel,
+            false,
+            false,
+            hovered,
+            Some(z),
+            false,
+        );
+        return true;
     }
     let min_side = rect.width().min(rect.height());
     let (material, adapt) = resolve(&theme.liquid, min_side);

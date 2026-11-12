@@ -1,4 +1,4 @@
-use eframe::egui::{
+use egui::{
     self, pos2, vec2, Color32, Mesh, Painter, Pos2, Rect, Shape, Stroke, StrokeKind, TextureHandle,
 };
 
@@ -26,6 +26,12 @@ pub struct Theme {
     pub background_dim: f32,
     /// Liquid-glass material, appearance and target selection.
     pub liquid: GlassConfig,
+    /// True when the wgpu liquid-rust backend is active. The egui painter then
+    /// records glass rectangles instead of drawing the native approximation.
+    pub real_glass: bool,
+    /// True during the second egui pass, which draws labels and content over
+    /// the real glass.
+    pub foreground_only: bool,
 }
 
 impl Theme {
@@ -51,6 +57,8 @@ impl Theme {
             ),
             background_dim: ui.background_dim,
             liquid: ui.liquid,
+            real_glass: false,
+            foreground_only: false,
         }
     }
 
@@ -215,6 +223,7 @@ pub fn rounded_rect_points(rect: Rect, radius: f32, segments: usize) -> Vec<Pos2
 }
 
 /// Dark glass panel: gradient fill, faint accent sheen, thin border and shadow.
+#[allow(clippy::too_many_arguments)]
 pub fn paint_card(
     painter: &Painter,
     rect: Rect,
@@ -222,10 +231,13 @@ pub fn paint_card(
     theme: &Theme,
     hovered: bool,
     active: bool,
+    z: i32,
+    allow_glass: bool,
 ) {
     let radius = radius.clamp(0.0, rect.width().min(rect.height()) * 0.5);
 
-    let glass_painted = crate::glass::paint_panel(painter, rect, radius, theme, hovered);
+    let glass_painted =
+        allow_glass && crate::glass::paint_panel(painter, rect, radius, theme, hovered, z);
 
     if !glass_painted {
         // Soft drop shadow, built from a few translucent rounded rects.

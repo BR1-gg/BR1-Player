@@ -1,7 +1,7 @@
 # Def Player
 
 A small desktop music player and playlist downloader written in Rust:
-native window (egui/eframe), playback with rodio, tags/cover art with lofty,
+native window (winit + egui-wgpu), playback with rodio, tags/cover art with lofty,
 downloads through yt-dlp and spotdl.
 
 ![Dashboard](screenshot-dashboard.png)
@@ -45,12 +45,20 @@ The settings are saved to `config.txt`.
 
 Def Player has an optional Apple-style **Liquid Glass** surface. Toggle it at
 **Settings → Appearance → Enable Liquid Glass mode**, then open the **GLASS** tab
-for the full material editor. It is a native egui port of the material model from
-[liquid-rust](https://github.com/al1h3n/liquid-rust) (MIT OR Apache-2.0): the same
-presets, tone fills, size adaptation, iOS 27 transparency slider and accessibility
-switches. The app keeps its OpenGL/egui renderer, so frost and refraction are
-reproduced with bevel bands and a directional rim light rather than a wgpu
-backdrop pass.
+for the full material editor. It uses the real
+[liquid-rust](https://github.com/al1h3n/liquid-rust) renderer (MIT OR Apache-2.0)
+on wgpu 30, with its presets, tone fills, size adaptation, iOS 27 transparency
+slider and accessibility switches.
+
+Each frame is composited in three stages: the dashboard backdrop (frame, colour or
+photo), the real glass pass, and a foreground pass with labels, artwork and
+controls. That keeps text crisp while the glass genuinely refracts and frosts the
+backdrop. A wgpu-capable GPU is required.
+
+Panels, transport, player/downloader chips and the settings modal go through the
+real wgpu pass. Menus, list-row highlights and slider balls stay in the native egui
+painter with the same material palette, because they sit in the foreground and
+must keep their labels crisp.
 
 ### Targets
 
@@ -77,10 +85,10 @@ and panels are on; the rest are off.
 
 | Setting | Range | What it does |
 | --- | --- | --- |
-| Refraction | 0–1 | strength of the bevel bands |
-| Depth | 0–80 pt | how far the bevel reaches inward |
-| Dispersion | 0–1 | chromatic split along the bevel |
-| Frost | 0–60 pt | white frost veil / blur weight |
+| Refraction | 0-1 | strength of the refraction bevel |
+| Depth | 0-80 pt | how far the bevel reaches inward |
+| Dispersion | 0-1 | chromatic split along the bevel |
+| Frost | 0-60 pt | backdrop blur radius |
 | Splay | 0–1 | how widely the rim light spreads |
 | Specular | 0–1 | strength of the lit rim |
 | Rim | 0–1 | bright inner edge |
@@ -273,7 +281,7 @@ terms of service of the sites you use.
 
 | File | Purpose |
 | --- | --- |
-| `src/main.rs` | window setup, command line arguments |
+| `src/main.rs` | winit window, egui-wgpu loop, liquid-rust compositor, command line arguments |
 | `src/app.rs` | application state and all UI drawing |
 | `src/audio.rs` | rodio playback engine, live 10-band EQ and visualizer tap |
 | `src/library.rs` | folder scanning, tag + cover extraction |
@@ -281,7 +289,7 @@ terms of service of the sites you use.
 | `src/queue.rs` | parallel download queue, per-job progress and cancellation |
 | `src/config.rs` | folder, quality, theme, dashboard layout and EQ settings (`%APPDATA%\DefPlayer\config.txt`) |
 | `src/theme.rs` | gradient/glass painting helpers and colour mixing |
-| `src/glass.rs` | liquid-glass material resolution, squircle geometry and painting |
+| `src/glass.rs` | liquid-glass material resolution, scene collection and native fallback painting |
 | `src/ui.rs` | custom-painted widgets and glyphs |
 | `src/visualizer.rs` | small FFT used by the spectrum view |
 

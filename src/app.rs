@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant};
 
-use eframe::egui;
 use egui::{
     pos2, vec2, Align, Align2, Color32, CornerRadius, CursorIcon, FontId, Id, Layout, Rect, Sense,
     Stroke, StrokeKind, TextureHandle, TextureOptions, Ui, UiBuilder,
@@ -157,26 +156,28 @@ pub struct PlayerApp {
     layout_edit: bool,
     eq_mode: EqMode,
     spectrum: Vec<f32>,
-    last_frame_time: f64,
     background_tex: Option<TextureHandle>,
     background_loaded: Option<PathBuf>,
+    drop_hovering: bool,
 }
 
 impl PlayerApp {
-    pub fn with_options(
-        cc: &eframe::CreationContext<'_>,
+    pub fn new(
+        egui_ctx: &egui::Context,
         initial_paths: Vec<PathBuf>,
         autoplay: bool,
         open_downloads: bool,
         initial_url: Option<String>,
+        real_glass: bool,
     ) -> Self {
         let mut saved = config::load();
         let configured = saved.is_some();
         let config = saved
             .take()
             .unwrap_or_else(|| Config::with_root(config::default_library_root()));
-        let theme = Theme::from_ui(&config.ui);
-        configure_style(&cc.egui_ctx, &theme);
+        let mut theme = Theme::from_ui(&config.ui);
+        theme.real_glass = real_glass;
+        configure_style(egui_ctx, &theme);
 
         let (audio, status) = match AudioEngine::new() {
             Ok(engine) => {
@@ -242,9 +243,9 @@ impl PlayerApp {
             layout_edit: false,
             eq_mode: EqMode::Equalizer,
             spectrum: vec![0.0; SPECTRUM_BINS],
-            last_frame_time: 0.0,
             background_tex: None,
             background_loaded: None,
+            drop_hovering: false,
         };
 
         if configured {
@@ -682,7 +683,11 @@ impl PlayerApp {
     }
 
     fn refresh_theme(&mut self, ctx: &egui::Context) {
+        let real_glass = self.theme.real_glass;
+        let foreground_only = self.theme.foreground_only;
         self.theme = Theme::from_ui(&self.config.ui);
+        self.theme.real_glass = real_glass;
+        self.theme.foreground_only = foreground_only;
         configure_style(ctx, &self.theme);
         if let Some(audio) = &self.audio {
             audio.set_eq(&self.config.ui.eq_gains, self.config.ui.eq_enabled);
@@ -733,7 +738,16 @@ impl PlayerApp {
         let width = (rect.width() * 0.56).clamp(420.0, 760.0);
         let height = 342.0f32.min(rect.height() - 80.0).max(280.0);
         let card = Rect::from_center_size(rect.center(), vec2(width, height));
-        theme::paint_card(ui.painter(), card, theme.radius + 6.0, &theme, false, false);
+        theme::paint_card(
+            ui.painter(),
+            card,
+            theme.radius + 6.0,
+            &theme,
+            false,
+            false,
+            0,
+            false,
+        );
 
         let inner = card.shrink2(vec2(30.0, 24.0));
         let mut child = ui.new_child(
@@ -998,7 +1012,7 @@ impl PlayerApp {
             }
         }
 
-        if ctx.wants_keyboard_input() || self.settings_open || self.layout_edit {
+        if ctx.egui_wants_keyboard_input() || self.settings_open || self.layout_edit {
             return;
         }
 
@@ -1052,7 +1066,7 @@ impl PlayerApp {
                 .raw
                 .dropped_files
                 .iter()
-                .filter_map(|file| file.path.clone())
+                .map(|file| file.path().to_path_buf())
                 .collect()
         });
 
@@ -1061,32 +1075,7 @@ impl PlayerApp {
         }
 
         let hovering = ctx.input(|input| !input.raw.hovered_files.is_empty());
-        if hovering {
-            let screen = ctx.screen_rect();
-            let theme = self.theme;
-            let painter = ctx.layer_painter(egui::LayerId::new(
-                egui::Order::Foreground,
-                Id::new("drop-overlay"),
-            ));
-
-            painter.rect_filled(screen, 0.0, Color32::from_rgba_unmultiplied(4, 4, 7, 220));
-            let card = Rect::from_center_size(screen.center(), vec2(440.0, 150.0));
-            theme::paint_card(&painter, card, 20.0, &theme, true, false);
-            painter.text(
-                card.center() - vec2(0.0, 16.0),
-                Align2::CENTER_CENTER,
-                "Drop to add to your library",
-                FontId::proportional(17.0),
-                theme.text(),
-            );
-            painter.text(
-                card.center() + vec2(0.0, 14.0),
-                Align2::CENTER_CENTER,
-                "Audio files and folders are supported.",
-                FontId::proportional(13.0),
-                theme.muted(),
-            );
-        }
+        self.drop_hovering = hovering;
     }
 
     /* ---------- top bar ---------- */
@@ -1238,13 +1227,13 @@ impl PlayerApp {
             );
             let response = child.add(
                 egui::TextEdit::singleline(&mut self.search_query)
-                    .frame(false)
+                    .frame(egui::Frame::NONE)
                     .hint_text("Search music, artists, playlists")
                     .font(FontId::proportional(13.0))
                     .text_color(theme.text())
                     .desired_width(f32::INFINITY)
                     .margin(egui::Margin::symmetric(0, 1))
-                    .vertical_align(Align::Center),
+                    .align(Align2::LEFT_CENTER),
             );
             if response.changed() {
                 self.search_active = true;
@@ -1351,7 +1340,7 @@ impl PlayerApp {
         }
 
         let cover_resp = ui
-            .interact(cover, ui.id().with("mini-cover"), Sense::click())
+            .interact(cover, ui.scope_id().with("mini-cover"), Sense::click())
             .on_hover_cursor(CursorIcon::PointingHand);
         if cover_resp.clicked() {
             self.toggle_play();
@@ -1380,15 +1369,7 @@ impl PlayerApp {
     /* ---------- dashboard ---------- */
 
     fn dashboard(&mut self, ui: &mut Ui, frame: Rect) {
-        let theme = self.theme;
-        theme::paint_dashboard_frame(ui.painter(), frame, &theme, self.background_tex.as_ref());
-
-        let pad_x = (frame.width() * 0.024).clamp(14.0, 30.0);
-        let pad_y = (frame.height() * 0.047).clamp(14.0, 30.0);
-        let content = Rect::from_min_max(
-            pos2(frame.left() + pad_x, frame.top() + pad_y),
-            pos2(frame.right() - pad_x, frame.bottom() - pad_y),
-        );
+        let content = Self::dashboard_content(frame);
 
         for kind in PANEL_KINDS {
             if self.config.ui.panels[kind.index()].visible {
@@ -1426,7 +1407,7 @@ impl PlayerApp {
             .pointer_hover_pos()
             .map(|pos| rect.contains(pos))
             .unwrap_or(false);
-        theme::paint_card(ui.painter(), rect, theme.radius, &theme, hovered, false);
+        theme::paint_card(ui.painter(), rect, theme.radius, &theme, hovered, false, 0, true);
 
         let border_pad = if theme.panel_border_visible {
             theme.panel_border_width.max(0.0)
@@ -1805,47 +1786,6 @@ impl PlayerApp {
             0.0
         };
         let art = rect.shrink(border_inset);
-        let art_radius = (theme.radius - border_inset).max(0.0);
-        // The song artwork always wins over the playlist cover. The playlist
-        // cover is only a fallback while nothing is selected.
-        let texture = if let Some(index) = self.current {
-            self.hero_tex
-                .as_ref()
-                .filter(|(hero_index, _)| *hero_index == index)
-                .map(|(_, texture)| texture.clone())
-                .or_else(|| {
-                    self.thumbs
-                        .get(index)
-                        .and_then(|texture| texture.as_ref())
-                        .cloned()
-                })
-        } else if let Some(name) = &self.active_playlist {
-            self.playlist_texture(name).cloned()
-        } else {
-            None
-        };
-
-        if let Some(texture) = &texture {
-            ui::paint_cover(ui, art, Some(texture), art_radius, &theme);
-        } else {
-            theme::gradient_rect(
-                ui.painter(),
-                art,
-                art_radius,
-                theme::lerp_color(theme.panel_top(), theme.accent_a, 0.30),
-                theme::lerp_color(theme.panel_bottom(), theme.accent_b, 0.17),
-                theme.angle,
-            );
-        }
-
-        theme::gradient_rect(
-            ui.painter(),
-            art,
-            art_radius,
-            Color32::from_rgba_unmultiplied(5, 5, 8, 40),
-            Color32::from_rgba_unmultiplied(5, 5, 8, 240),
-            90.0,
-        );
 
         let title = self
             .track()
@@ -2099,7 +2039,7 @@ impl PlayerApp {
 
         let cover_click = ui.interact(
             Rect::from_min_max(art.min, pos2(art.right(), seek_y - 18.0)),
-            ui.id().with("player-cover-click"),
+            ui.scope_id().with("player-cover-click"),
             Sense::click(),
         );
         if cover_click.clicked() {
@@ -2155,13 +2095,13 @@ impl PlayerApp {
         );
         let response = input_child.add(
             egui::TextEdit::singleline(&mut self.download_url)
-                .frame(false)
+                .frame(egui::Frame::NONE)
                 .hint_text("YouTube or Spotify link…")
                 .font(FontId::proportional(12.0))
                 .text_color(theme.text())
                 .desired_width(f32::INFINITY)
                 .margin(egui::Margin::symmetric(0, 1))
-                .vertical_align(Align::Center),
+                .align(Align2::LEFT_CENTER),
         );
         if self.download_focus {
             response.request_focus();
@@ -2484,7 +2424,7 @@ impl PlayerApp {
                             );
                             let response = ui.interact(
                                 cancel_rect,
-                                Id::new(("cancel-job", *id)),
+                                Id::unique(("cancel-job", *id)),
                                 Sense::click(),
                             );
                             if response.hovered() {
@@ -2694,7 +2634,7 @@ impl PlayerApp {
             );
             let response = ui.interact(
                 band_rect,
-                Id::new(("eq-band", index)),
+                Id::unique(("eq-band", index)),
                 Sense::click_and_drag(),
             );
             let center_y = bottom - (bottom - top) * 0.5;
@@ -2917,7 +2857,7 @@ impl PlayerApp {
             let move_response = ui
                 .interact(
                     rect,
-                    Id::new(("layout-move", kind.index())),
+                    Id::unique(("layout-move", kind.index())),
                     Sense::click_and_drag(),
                 )
                 .on_hover_cursor(CursorIcon::Grab);
@@ -2944,7 +2884,7 @@ impl PlayerApp {
             let resize_response = ui
                 .interact(
                     handle,
-                    Id::new(("layout-resize", kind.index())),
+                    Id::unique(("layout-resize", kind.index())),
                     Sense::click_and_drag(),
                 )
                 .on_hover_cursor(CursorIcon::ResizeNwSe);
@@ -2980,7 +2920,7 @@ impl PlayerApp {
             let delete_response = ui
                 .interact(
                     delete_rect,
-                    Id::new(("layout-delete", kind.index())),
+                    Id::unique(("layout-delete", kind.index())),
                     Sense::click(),
                 )
                 .on_hover_cursor(CursorIcon::PointingHand)
@@ -3082,7 +3022,7 @@ impl PlayerApp {
             return;
         }
         let theme = self.theme;
-        let screen = ctx.screen_rect();
+        let screen = ctx.content_rect();
 
         let mut action: Option<AddMenuAction> = None;
         let layout_edit = self.layout_edit;
@@ -3091,8 +3031,9 @@ impl PlayerApp {
             .copied()
             .filter(|kind| !self.config.ui.panels[kind.index()].visible)
             .collect();
-        egui::Area::new(Id::new("add-menu-overlay"))
+        egui::Area::new(Id::unique("add-menu-overlay"))
             .order(egui::Order::Foreground)
+            .fade_in(false)
             .fixed_pos(screen.min)
             .show(ctx, |ui| {
                 let (backdrop, _) = ui.allocate_exact_size(screen.size(), Sense::hover());
@@ -3267,8 +3208,9 @@ impl PlayerApp {
         self.search_popup_rect = popup;
 
         let mut action: Option<(bool, usize)> = None;
-        let area = egui::Area::new(Id::new("search-results"))
+        let area = egui::Area::new(Id::unique("search-results"))
             .order(egui::Order::Foreground)
+            .fade_in(false)
             .fixed_pos(popup.min)
             .show(ctx, |ui| {
                 let popup_frame = egui::Frame::NONE
@@ -3446,7 +3388,7 @@ impl PlayerApp {
 
     fn settings_modal(&mut self, ctx: &egui::Context) {
         let theme = self.theme;
-        let screen = ctx.screen_rect();
+        let screen = ctx.content_rect();
         let width = (screen.width() * 0.82).min(780.0);
         let height = (screen.height() * 0.86).min(650.0);
         let modal = Rect::from_center_size(screen.center(), vec2(width, height));
@@ -3454,28 +3396,27 @@ impl PlayerApp {
         let mut close = false;
         let mut action: Option<SettingsAction> = None;
 
-        egui::Area::new(Id::new("settings-overlay"))
+        egui::Area::new(Id::unique("settings-overlay"))
             .order(egui::Order::Foreground)
+            .fade_in(false)
             .fixed_pos(screen.min)
             .show(ctx, |ui| {
-                let (backdrop, _) = ui.allocate_exact_size(screen.size(), Sense::hover());
-                ui.painter().rect_filled(
-                    backdrop,
-                    0.0,
-                    Color32::from_rgba_unmultiplied(2, 2, 4, 205),
-                );
+                let (_backdrop, _) = ui.allocate_exact_size(screen.size(), Sense::hover());
 
                 let mut modal_ui =
                     ui.new_child(UiBuilder::new().max_rect(modal).id_salt("settings-card"));
                 modal_ui.set_clip_rect(modal.expand(4.0));
                 // A glass modal sits over a busy dashboard; keep its base dark
-                // enough that the controls stay legible through the face.
-                modal_ui.painter().rect_filled(
-                    modal,
-                    20.0,
-                    Color32::from_rgba_unmultiplied(8, 8, 12, 240),
-                );
-                theme::paint_card(modal_ui.painter(), modal, 20.0, &theme, false, false);
+                // enough that the controls stay legible through the face. The
+                // real wgpu pass supplies its own face instead.
+                if !(theme.foreground_only && theme.real_glass) {
+                    modal_ui.painter().rect_filled(
+                        modal,
+                        20.0,
+                        Color32::from_rgba_unmultiplied(8, 8, 12, 240),
+                    );
+                }
+                theme::paint_card(modal_ui.painter(), modal, 20.0, &theme, false, false, 4, true);
                 let modal_border = if theme.panel_border_visible {
                     theme.panel_border_width.max(0.0)
                 } else {
@@ -3502,7 +3443,7 @@ impl PlayerApp {
                     vec2(24.0, 24.0),
                 );
                 let close_response =
-                    child.interact(close_rect, Id::new("settings-close"), Sense::click());
+                    child.interact(close_rect, Id::unique("settings-close"), Sense::click());
                 theme::paint_icon_button(
                     child.painter(),
                     close_rect,
@@ -3982,6 +3923,8 @@ impl PlayerApp {
             &self.theme,
             false,
             false,
+            5,
+            true,
         );
         let inner = preview.shrink2(vec2(16.0, 14.0));
         theme::gradient_rect(
@@ -4269,7 +4212,7 @@ impl PlayerApp {
                 Rect::from_center_size(pos2(row.right() - 20.0, row.center().y), vec2(34.0, 18.0));
             let response = ui.interact(
                 toggle,
-                Id::new(("panel-toggle", kind.index())),
+                Id::unique(("panel-toggle", kind.index())),
                 Sense::click(),
             );
             let t = if panel.visible { 1.0 } else { 0.0 };
@@ -4569,8 +4512,13 @@ enum AddMenuAction {
     Restore(PanelKind),
 }
 
-impl eframe::App for PlayerApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+impl PlayerApp {
+    pub fn on_close(&mut self) {
+        self.save_config();
+        self.manager.kill_all_now();
+    }
+
+    pub fn update_logic(&mut self, ctx: &egui::Context) {
         if ctx.input(|input| input.viewport().close_requested()) {
             self.save_config();
             self.manager.kill_all_now();
@@ -4593,38 +4541,168 @@ impl eframe::App for PlayerApp {
             self.status = None;
             self.status_at = None;
         }
+    }
 
+    fn layout_rects(rect: Rect) -> (Rect, Rect) {
+        let bar_height = (rect.height() * 0.095).clamp(66.0, 78.0);
+        let top = Rect::from_min_size(rect.min, vec2(rect.width(), bar_height));
+        let margin = (rect.width() * 0.012).clamp(12.0, 20.0);
+        let frame_rect = Rect::from_min_max(
+            pos2(rect.left() + margin, rect.top() + bar_height + 8.0),
+            pos2(rect.right() - margin, rect.bottom() - margin),
+        );
+        (top, frame_rect)
+    }
+
+    fn dashboard_content(frame: Rect) -> Rect {
+        let pad_x = (frame.width() * 0.024).clamp(14.0, 30.0);
+        let pad_y = (frame.height() * 0.047).clamp(14.0, 30.0);
+        Rect::from_min_max(
+            pos2(frame.left() + pad_x, frame.top() + pad_y),
+            pos2(frame.right() - pad_x, frame.bottom() - pad_y),
+        )
+    }
+
+    fn paint_player_art(&self, ui: &Ui, rect: Rect, theme: &Theme) {
+        let border_inset = if theme.panel_border_visible {
+            theme.panel_border_width.max(0.0)
+        } else {
+            0.0
+        };
+        let art = rect.shrink(border_inset);
+        let art_radius = (theme.radius - border_inset).max(0.0);
+        let texture = if let Some(index) = self.current {
+            self.hero_tex
+                .as_ref()
+                .filter(|(hero_index, _)| *hero_index == index)
+                .map(|(_, texture)| texture.clone())
+                .or_else(|| {
+                    self.thumbs
+                        .get(index)
+                        .and_then(|texture| texture.as_ref())
+                        .cloned()
+                })
+        } else if let Some(name) = &self.active_playlist {
+            self.playlist_texture(name).cloned()
+        } else {
+            None
+        };
+
+        if let Some(texture) = &texture {
+            ui::paint_cover(ui, art, Some(texture), art_radius, theme);
+        } else {
+            theme::gradient_rect(
+                ui.painter(),
+                art,
+                art_radius,
+                theme::lerp_color(theme.panel_top(), theme.accent_a, 0.30),
+                theme::lerp_color(theme.panel_bottom(), theme.accent_b, 0.17),
+                theme.angle,
+            );
+        }
+
+        theme::gradient_rect(
+            ui.painter(),
+            art,
+            art_radius,
+            Color32::from_rgba_unmultiplied(5, 5, 8, 40),
+            Color32::from_rgba_unmultiplied(5, 5, 8, 240),
+            90.0,
+        );
+    }
+
+    /// First egui pass: only the backdrop and the dashboard frame. This is
+    /// what the real glass refracts.
+    pub fn draw_background(&mut self, ui: &mut egui::Ui) {
         let theme = self.theme;
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(theme.bg()))
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 let rect = ui.max_rect();
                 let time = ui.input(|input| input.time);
-                if (time - self.last_frame_time).abs() > 0.25 {
-                    self.last_frame_time = time;
-                }
                 theme::paint_backdrop(ui.painter(), rect, &theme, time);
 
+                if self.view == View::Dashboard {
+                    let (_, frame_rect) = Self::layout_rects(rect);
+                    theme::paint_dashboard_frame(
+                        ui.painter(),
+                        frame_rect,
+                        &theme,
+                        self.background_tex.as_ref(),
+                    );
+                    let content = Self::dashboard_content(frame_rect);
+                    if self.config.ui.panels[PanelKind::Player.index()].visible {
+                        let player = self.panel_rect(content, PanelKind::Player);
+                        if player.width() > 40.0 && player.height() > 30.0 {
+                            self.paint_player_art(ui, player, &theme);
+                        }
+                    }
+                    if self.settings_open {
+                        ui.painter().rect_filled(
+                            rect,
+                            0.0,
+                            Color32::from_rgba_unmultiplied(2, 2, 4, 205),
+                        );
+                        let modal = Rect::from_center_size(
+                            rect.center(),
+                            vec2(
+                                (rect.width() * 0.82).min(780.0),
+                                (rect.height() * 0.86).min(650.0),
+                            ),
+                        );
+                        theme::gradient_rect(
+                            ui.painter(),
+                            modal,
+                            20.0,
+                            theme::lerp_color(theme.panel_top(), theme.accent_a, 0.18),
+                            theme::lerp_color(theme.panel_bottom(), theme.accent_b, 0.12),
+                            theme.angle,
+                        );
+                    }
+                }
+            });
+    }
+
+    /// Second egui pass: labels, artwork, panel content and the non-glass
+    /// controls. Glass-target backgrounds are skipped and recorded for the
+    /// liquid-rust scene, so they land between the two passes.
+    pub fn draw_foreground(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let ctx = &ctx;
+        let theme = self.theme;
+        let real_capable = theme.real_glass;
+        self.theme.foreground_only = true;
+
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(Color32::TRANSPARENT))
+            .show(ui, |ui| {
+                let rect = ui.max_rect();
                 if self.view == View::Setup {
                     self.setup_screen(ui, rect);
                     return;
                 }
 
-                let bar_height = (rect.height() * 0.095).clamp(66.0, 78.0);
-                let top = Rect::from_min_size(rect.min, vec2(rect.width(), bar_height));
-                let margin = (rect.width() * 0.012).clamp(12.0, 20.0);
-                let frame_rect = Rect::from_min_max(
-                    pos2(rect.left() + margin, rect.top() + bar_height + 8.0),
-                    pos2(rect.right() - margin, rect.bottom() - margin),
-                );
+                let (top, frame_rect) = Self::layout_rects(rect);
 
-                self.top_bar(ui, top);
-                self.dashboard(ui, frame_rect);
+                if real_capable {
+                    let show_dashboard = !self.settings_open;
+                    self.theme.real_glass = show_dashboard;
+                    self.theme.liquid.enabled =
+                        self.config.ui.liquid.enabled && show_dashboard;
+                }
+
+                if !self.settings_open {
+                    self.top_bar(ui, top);
+                    self.dashboard(ui, frame_rect);
+                }
+
+                self.theme.real_glass = real_capable;
+                self.theme.liquid.enabled = self.config.ui.liquid.enabled;
 
                 if self.settings_open || self.add_menu_open {
                     let _ = ui.interact(
                         rect,
-                        Id::new("modal-input-blocker"),
+                        Id::unique("modal-input-blocker"),
                         Sense::click_and_drag(),
                     );
                 }
@@ -4636,7 +4714,39 @@ impl eframe::App for PlayerApp {
                         self.settings_modal(ctx);
                     }
                 }
+
+                if self.drop_hovering {
+                    let screen = ui.max_rect();
+                    let theme = self.theme;
+                    let painter = ui.painter();
+                    painter.rect_filled(
+                        screen,
+                        0.0,
+                        Color32::from_rgba_unmultiplied(4, 4, 7, 220),
+                    );
+                    let card = Rect::from_center_size(screen.center(), vec2(440.0, 150.0));
+                    theme::paint_card(painter, card, 20.0, &theme, true, false, 6, false);
+                    painter.text(
+                        card.center() - vec2(0.0, 16.0),
+                        Align2::CENTER_CENTER,
+                        "Drop to add to your library",
+                        FontId::proportional(17.0),
+                        theme.text(),
+                    );
+                    painter.text(
+                        card.center() + vec2(0.0, 14.0),
+                        Align2::CENTER_CENTER,
+                        "Audio files and folders are supported.",
+                        FontId::proportional(13.0),
+                        theme.muted(),
+                    );
+                }
+
+                self.theme.real_glass = real_capable;
+                self.theme.liquid.enabled = self.config.ui.liquid.enabled;
             });
+
+        self.theme.foreground_only = false;
     }
 }
 
@@ -4811,7 +4921,7 @@ fn format_duration(seconds: f32) -> String {
 }
 
 fn configure_style(ctx: &egui::Context, theme: &Theme) {
-    let mut style = (*ctx.style()).clone();
+    let mut style = (*ctx.style_of(egui::Theme::Dark)).clone();
     let mut visuals = egui::Visuals::dark();
     visuals.panel_fill = theme.bg();
     visuals.window_fill = theme.panel_top();
@@ -4836,5 +4946,6 @@ fn configure_style(ctx: &egui::Context, theme: &Theme) {
     style.visuals = visuals;
     style.spacing.item_spacing = vec2(8.0, 8.0);
     style.spacing.button_padding = vec2(10.0, 6.0);
-    ctx.set_style(style);
+    ctx.set_style_of(egui::Theme::Dark, style.clone());
+    ctx.set_style_of(egui::Theme::Light, style);
 }

@@ -1,4 +1,4 @@
-use eframe::egui::{
+use egui::{
     self, pos2, vec2, Align2, Color32, CornerRadius, CursorIcon, FontId, Painter, Rect, Response,
     Sense, Shape, Stroke, TextureHandle, Ui,
 };
@@ -300,7 +300,7 @@ pub fn glyph_button(
     slot: GlassSlot,
 ) -> Response {
     let response = ui
-        .interact(rect, ui.id().with(id), Sense::click())
+        .interact(rect, ui.scope_id().with(id), Sense::click())
         .on_hover_cursor(CursorIcon::PointingHand);
     let painter = ui.painter();
 
@@ -361,7 +361,7 @@ pub fn circle_button(
     slot: GlassSlot,
 ) -> Response {
     let response = ui
-        .interact(rect, ui.id().with(id), Sense::click())
+        .interact(rect, ui.scope_id().with(id), Sense::click())
         .on_hover_cursor(CursorIcon::PointingHand);
     theme::paint_icon_button(
         ui.painter(),
@@ -455,7 +455,7 @@ pub fn chip(
     slot: GlassSlot,
 ) -> Response {
     let response = ui
-        .interact(rect, ui.id().with(id), Sense::click())
+        .interact(rect, ui.scope_id().with(id), Sense::click())
         .on_hover_cursor(CursorIcon::PointingHand);
     let painter = ui.painter();
     theme::paint_pill(
@@ -488,9 +488,9 @@ pub fn slider(
     theme: &Theme,
 ) -> (Response, Option<f32>) {
     let response = if enabled {
-        ui.interact(rect, ui.id().with(id), Sense::click_and_drag())
+        ui.interact(rect, ui.scope_id().with(id), Sense::click_and_drag())
     } else {
-        ui.interact(rect, ui.id().with(id), Sense::hover())
+        ui.interact(rect, ui.scope_id().with(id), Sense::hover())
     };
 
     let painter = ui.painter();
@@ -640,22 +640,30 @@ pub fn menu_item(ui: &mut Ui, label: &str, glyph: Glyph, theme: &Theme) -> Respo
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 38.0), Sense::click());
     let painter = ui.painter();
     if response.hovered() {
-        let glass = crate::glass::paint_button(
-            painter,
-            rect.shrink2(vec2(2.0, 1.0)),
-            theme,
-            true,
-            false,
-            false,
-            false,
-            GlassSlot::Menu,
-        );
-        if !glass {
+        if theme.real_glass {
             painter.rect_filled(
                 rect,
                 CornerRadius::from(9.0),
                 Color32::from_rgba_unmultiplied(255, 255, 255, 18),
             );
+        } else {
+            let glass = crate::glass::paint_button(
+                painter,
+                rect.shrink2(vec2(2.0, 1.0)),
+                theme,
+                true,
+                false,
+                false,
+                false,
+                GlassSlot::Menu,
+            );
+            if !glass {
+                painter.rect_filled(
+                    rect,
+                    CornerRadius::from(9.0),
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 18),
+                );
+            }
         }
     }
     paint_glyph(

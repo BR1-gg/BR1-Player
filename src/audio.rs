@@ -1,13 +1,14 @@
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::BufReader;
+use std::num::NonZero;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rodio::source::SeekError;
-use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
+use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, Source};
 
 use crate::config::EQ_BANDS;
 
@@ -155,11 +156,11 @@ struct FxSource<S> {
 
 impl<S> FxSource<S>
 where
-    S: Source<Item = i16>,
+    S: Source<Item = f32>,
 {
     fn new(inner: S, fx: Arc<FxShared>) -> Self {
-        let channels = inner.channels().max(1);
-        let sample_rate = inner.sample_rate().max(8_000);
+        let channels = inner.channels().get();
+        let sample_rate = inner.sample_rate().get().max(8_000);
         fx.sample_rate.store(sample_rate, Ordering::Relaxed);
         let gains = fx
             .gains
@@ -230,7 +231,7 @@ where
 
 impl<S> Iterator for FxSource<S>
 where
-    S: Source<Item = i16>,
+    S: Source<Item = f32>,
 {
     type Item = f32;
 
@@ -240,7 +241,7 @@ where
             self.refresh();
         }
 
-        let input = raw as f32 / 32_768.0;
+        let input = raw.clamp(-1.0, 1.0);
         let channel = (self.frame as usize) % self.channels.max(1) as usize;
         let mut value = input;
 
@@ -273,18 +274,18 @@ where
 
 impl<S> Source for FxSource<S>
 where
-    S: Source<Item = i16>,
+    S: Source<Item = f32>,
 {
-    fn current_frame_len(&self) -> Option<usize> {
-        self.inner.current_frame_len()
+    fn current_span_len(&self) -> Option<usize> {
+        self.inner.current_span_len()
     }
 
-    fn channels(&self) -> u16 {
-        self.channels
+    fn channels(&self) -> NonZero<u16> {
+        NonZero::new(self.channels).unwrap_or(NonZero::<u16>::MIN)
     }
 
-    fn sample_rate(&self) -> u32 {
-        self.sample_rate
+    fn sample_rate(&self) -> NonZero<u32> {
+        NonZero::new(self.sample_rate).unwrap_or(NonZero::<u32>::MIN)
     }
 
     fn total_duration(&self) -> Option<Duration> {
@@ -302,9 +303,8 @@ where
 /// Thin wrapper around rodio: one sink, one track at a time, plus a live EQ and
 /// a sample tap used by the spectrum visualizer.
 pub struct AudioEngine {
-    _stream: OutputStream,
-    handle: OutputStreamHandle,
-    sink: Option<Sink>,
+    _stream: MixerDeviceSink,
+    sink: Option<Player>,
     volume: f32,
     muted: bool,
     fx: Arc<FxShared>,
@@ -312,11 +312,10 @@ pub struct AudioEngine {
 
 impl AudioEngine {
     pub fn new() -> Result<Self, String> {
-        let (stream, handle) =
-            OutputStream::try_default().map_err(|err| format!("No audio output: {err}"))?;
+        let stream = DeviceSinkBuilder::open_default_sink()
+            .map_err(|err| format!("No audio output: {err}"))?;
         Ok(Self {
             _stream: stream,
-            handle,
             sink: None,
             volume: 0.8,
             muted: false,
@@ -334,8 +333,7 @@ impl AudioEngine {
             sink.stop();
         }
 
-        let sink =
-            Sink::try_new(&self.handle).map_err(|err| format!("Audio device error: {err}"))?;
+        let sink = Player::connect_new(self._stream.mixer());
         sink.set_volume(self.effective_volume());
         sink.append(source);
         sink.play();
