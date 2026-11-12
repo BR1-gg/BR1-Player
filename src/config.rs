@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 pub const DEFAULT_QUALITY: u16 = 192;
 pub const DEFAULT_PARALLEL: usize = 3;
-pub const PANEL_COUNT: usize = 5;
+pub const PANEL_COUNT: usize = 6;
 pub const EQ_BANDS: usize = 10;
 
 /// One dashboard panel, stored as a fraction of the dashboard's inner area so
@@ -449,8 +449,16 @@ impl Default for UiConfig {
                 PanelRect::new(0.67598, 0.04702, 0.29876, 0.58934),
                 // Playlist covers (bottom, spanning left + centre)
                 PanelRect::new(0.02445, 0.65413, 0.64293, 0.29676),
-                // Equalizer / visualizer (bottom right)
+                // Equalizer (bottom right)
                 PanelRect::new(0.67598, 0.65413, 0.29876, 0.29676),
+                // Audio visualizer — hidden until added from the component menu
+                PanelRect {
+                    x: 0.67598,
+                    y: 0.65413,
+                    w: 0.29876,
+                    h: 0.29676,
+                    visible: false,
+                },
             ],
             eq_enabled: true,
             eq_gains: [0.0; EQ_BANDS],
@@ -572,6 +580,7 @@ fn panel_key(index: usize) -> &'static str {
         2 => "layout.downloader",
         3 => "layout.playlists",
         4 => "layout.equalizer",
+        5 => "layout.visualizer",
         _ => "layout.unknown",
     }
 }

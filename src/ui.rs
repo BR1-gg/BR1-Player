@@ -19,9 +19,6 @@ pub enum Glyph {
     Volume,
     Mute,
     Note,
-    Download,
-    Folder,
-    Music,
 }
 
 /* ---------- covers ---------- */
@@ -214,7 +211,7 @@ pub fn paint_glyph(
                 );
             }
         }
-        Glyph::Note | Glyph::Music => {
+        Glyph::Note => {
             let head = s * 0.30;
             let left = center + vec2(-s * 0.5, s * 0.55);
             let right = center + vec2(s * 0.55, s * 0.20);
@@ -245,50 +242,8 @@ pub fn paint_glyph(
                 color,
             );
         }
-        Glyph::Download => {
-            painter.line_segment(
-                [center - vec2(0.0, s * 0.85), center + vec2(0.0, s * 0.25)],
-                Stroke::new(s * 0.20, color),
-            );
-            painter.add(Shape::convex_polygon(
-                vec![
-                    center + vec2(-s * 0.42, s * 0.05),
-                    center + vec2(s * 0.42, s * 0.05),
-                    center + vec2(0.0, s * 0.62),
-                ],
-                color,
-                fill,
-            ));
-            painter.line_segment(
-                [
-                    center + vec2(-s * 0.78, s * 0.85),
-                    center + vec2(s * 0.78, s * 0.85),
-                ],
-                Stroke::new(s * 0.20, color),
-            );
-        }
-        Glyph::Folder => {
-            painter.rect_filled(
-                Rect::from_min_max(
-                    center + vec2(-s * 0.9, -s * 0.55),
-                    center + vec2(-s * 0.1, -s * 0.25),
-                ),
-                0.0,
-                color,
-            );
-            painter.rect_filled(
-                Rect::from_min_max(
-                    center + vec2(-s * 0.9, -s * 0.35),
-                    center + vec2(s * 0.9, s * 0.6),
-                ),
-                s * 0.12,
-                color,
-            );
-        }
     }
 }
-
-/* ---------- buttons ---------- */
 
 pub fn glyph_button(
     ui: &Ui,
@@ -634,6 +589,55 @@ pub fn progress_bar(
             }
         }
     }
+}
+
+/// Menu row with a tick indicator, used by the component menu.
+pub fn menu_toggle_item(ui: &mut Ui, label: &str, enabled: bool, theme: &Theme) -> Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::click());
+    let painter = ui.painter();
+
+    if response.hovered() {
+        painter.rect_filled(
+            rect,
+            CornerRadius::from(9.0),
+            Color32::from_rgba_unmultiplied(255, 255, 255, 18),
+        );
+    }
+
+    let box_rect = Rect::from_center_size(
+        pos2(rect.left() + 20.0, rect.center().y),
+        vec2(15.0, 15.0),
+    );
+    if enabled {
+        painter.rect_filled(box_rect, 4.0, theme.accent_b);
+        let center = box_rect.center();
+        let ink = Color32::from_rgb(12, 12, 18);
+        painter.line_segment(
+            [pos2(center.x - 3.6, center.y + 0.2), pos2(center.x - 0.9, center.y + 2.9)],
+            Stroke::new(1.7_f32, ink),
+        );
+        painter.line_segment(
+            [pos2(center.x - 0.9, center.y + 2.9), pos2(center.x + 3.8, center.y - 2.8)],
+            Stroke::new(1.7_f32, ink),
+        );
+    } else {
+        painter.rect_stroke(
+            box_rect,
+            4.0,
+            Stroke::new(1.4_f32, theme.muted()),
+            egui::StrokeKind::Inside,
+        );
+    }
+
+    painter.text(
+        pos2(rect.left() + 40.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(12.0),
+        if enabled { theme.text() } else { theme.muted() },
+    );
+
+    response
 }
 
 pub fn menu_item(ui: &mut Ui, label: &str, glyph: Glyph, theme: &Theme) -> Response {

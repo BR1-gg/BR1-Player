@@ -16,17 +16,21 @@ independent components:
 - **Current playlist** — the tracks of the selected playlist (or All music).
 - **Player** — the current cover used as a background, title, seek bar and transport.
 - **Downloader** — link input, source detection, quality/parallel options and queue.
-- **Playlists** — cover cards; click one to filter the current playlist.
-- **Equalizer / visualizer** — a real 10-band peaking EQ, or a live spectrum view.
+- **Playlists** — cover cards; click one to filter the current playlist. The panel
+  adapts to its shape: a single row when it is wide, a wrapping grid when it is tall,
+  scrolling with the mouse wheel either way.
+- **Equalizer** — a real 10-band peaking EQ with presets.
+- **Audio visualizer** — a live spectrum view (separate component, add it from the `+` menu).
 
-Every panel can be moved and resized. Open **Settings → Layout → Edit layout**
-(or press `Ctrl+L`), drag a panel, then pull the bright dot in its bottom-right
-corner. Panels snap to each other's edges, to the frame and to an 8 px grid, and
-they stay inside a safe area so they never crowd the frame border. Positions and
-sizes are stored as proportions of the frame, so the layout follows the window
-size. In edit mode a red button in the panel corner hides it; the top-left `+`
-changes purpose and lists hidden components so you can add them back. The Layout
-tab also has a visibility switch for every component.
+Every panel can be moved and resized. Press the top-left `+` to open the **component
+menu**: it enters layout mode and lists every component with a tick. Click a component
+to drop it into a free spot on the dashboard, click again to hide it. `Reset layout`
+restores the default arrangement, and `DONE` in the top bar leaves layout mode. You can
+also drag a panel and pull the bright dot in its bottom-right corner; panels snap to each
+other's edges, to the frame and to an 8 px grid, and they stay inside a safe area so they
+never crowd the frame border. Positions and sizes are stored as proportions of the frame,
+so the layout follows the window size. In edit mode a red button in the panel corner hides
+it, and **Settings → Layout** has a visibility switch for every component.
 
 The inner dashboard keeps its own dark surface (or your photo); the outer frame
 is independently themeable from **Settings → Appearance**:
