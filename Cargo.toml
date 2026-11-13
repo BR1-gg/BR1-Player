@@ -1,9 +1,9 @@
 [package]
-name = "def_player"
+name = "br1_player"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.99"
-description = "Simple desktop music player"
+description = "BR1 Player - desktop music player with playlist downloads"
 
 [dependencies]
 egui = { version = "0.37.0", features = ["default_fonts"] }

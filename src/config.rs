@@ -110,7 +110,7 @@ pub struct GlassTargets {
 
 impl Default for GlassTargets {
     fn default() -> Self {
-        // The set chosen for Def Player: transport, player chips, downloader
+        // The set chosen for BR1 Player: transport, player chips, downloader
         // actions, menus, lists/cards, panels/modals and slider knobs.
         Self {
             top_bar: false,
@@ -515,7 +515,7 @@ pub fn default_library_root() -> PathBuf {
     let base = std::env::var_os("USERPROFILE")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    base.join("Music").join("Def Player")
+    base.join("Music").join("BR1 Player")
 }
 
 pub fn config_path() -> Option<PathBuf> {

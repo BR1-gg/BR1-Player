@@ -402,6 +402,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "br1_player"
+version = "0.1.0"
+dependencies = [
+ "egui",
+ "egui-wgpu",
+ "egui-winit",
+ "image",
+ "liquid-rust",
+ "lofty",
+ "pollster 1.0.1",
+ "rfd",
+ "rodio",
+ "wgpu",
+ "winit",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -727,23 +744,6 @@ name = "data-encoding"
 version = "2.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
-
-[[package]]
-name = "def_player"
-version = "0.1.0"
-dependencies = [
- "egui",
- "egui-wgpu",
- "egui-winit",
- "image",
- "liquid-rust",
- "lofty",
- "pollster 1.0.1",
- "rfd",
- "rodio",
- "wgpu",
- "winit",
-]
 
 [[package]]
 name = "dispatch"

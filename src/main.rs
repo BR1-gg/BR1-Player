@@ -48,8 +48,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             "--help" | "-h" => {
-                println!("Def Player");
-                println!("Usage: def_player [options] [file or folder ...]");
+                println!("BR1 Player");
+                println!("Usage: br1_player [options] [file or folder ...]");
                 println!();
                 println!("  --play             start playing the first track after loading");
                 println!("  --downloads        open the download page at startup");
@@ -321,13 +321,13 @@ impl ApplicationHandler for App {
         }
 
         let attributes = Window::default_attributes()
-            .with_title("Def Player")
+            .with_title("BR1 Player")
             .with_inner_size(LogicalSize::new(1180.0, 760.0))
             .with_min_inner_size(LogicalSize::new(900.0, 560.0));
         let window = Arc::new(
             event_loop
                 .create_window(attributes)
-                .expect("failed to create the Def Player window"),
+                .expect("failed to create the BR1 Player window"),
         );
 
         let gpu = pollster::block_on(Gpu::new(window.clone())).expect("failed to start wgpu");
@@ -445,7 +445,7 @@ impl Gpu {
             .await?;
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
-                label: Some("Def Player"),
+                label: Some("BR1 Player"),
                 ..Default::default()
             })
             .await?;

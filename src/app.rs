@@ -772,7 +772,7 @@ impl PlayerApp {
         child.spacing_mut().item_spacing = vec2(8.0, 8.0);
 
         child.label(
-            egui::RichText::new("DEF PLAYER")
+            egui::RichText::new("BR1 PLAYER")
                 .size(11.0)
                 .color(theme.muted())
                 .strong(),
@@ -787,7 +787,7 @@ impl PlayerApp {
         child.add_space(3.0);
         child.label(
             egui::RichText::new(
-                "Choose the main folder Def Player uses for downloads and playlists. The dashboard is built around it.",
+                "Choose the main folder BR1 Player uses for downloads and playlists. The dashboard is built around it.",
             )
             .size(12.5)
             .color(theme.muted()),
@@ -855,7 +855,7 @@ impl PlayerApp {
         if ui::pill_button_sized(
             &mut child,
             210.0,
-            "Start using Def Player",
+            "Start using BR1 Player",
             true,
             &theme,
             GlassSlot::Setup,
@@ -4813,7 +4813,7 @@ impl PlayerApp {
 
     fn about_settings(&mut self, ui: &mut Ui, theme: &Theme) {
         ui.label(
-            egui::RichText::new("DEF PLAYER")
+            egui::RichText::new("BR1 PLAYER")
                 .size(18.0)
                 .color(theme.text())
                 .strong(),

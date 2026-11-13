@@ -1,4 +1,4 @@
-# Def Player
+# BR1 Player
 
 A small desktop music player and playlist downloader written in Rust:
 native window (winit + egui-wgpu), playback with rodio, tags/cover art with lofty,
@@ -53,7 +53,7 @@ The settings are saved to `config.txt`.
 
 ## Liquid Glass
 
-Def Player has an optional Apple-style **Liquid Glass** surface. Toggle it at
+BR1 Player has an optional Apple-style **Liquid Glass** surface. Toggle it at
 **Settings → Appearance → Enable Liquid Glass mode**, then open the **GLASS** tab
 for the full material editor. It uses the real
 [liquid-rust](https://github.com/al1h3n/liquid-rust) renderer (MIT OR Apache-2.0)
@@ -86,7 +86,7 @@ Each group can be enabled independently:
 | Slider balls only | seek, volume and EQ knobs (the track stays flat) |
 | Panels and modals | the five dashboard panels, settings card, preview card |
 | Settings controls | settings tabs, action pills, toggles, colour presets |
-| Setup screen | Choose folder, Use default, Start using Def Player |
+| Setup screen | Choose folder, Use default, Start using BR1 Player |
 
 Defaults: transport, player chips, downloader actions, menus, lists, slider balls
 and panels are on; the rest are off.
@@ -179,7 +179,7 @@ All glass values are stored in `config.txt` under keys beginning with
 ## Where files are saved
 
 Everything lives under the **main folder** you pick on first run (default
-`C:\Users\<you>\Music\Def Player`):
+`C:\Users\<you>\Music\BR1 Player`):
 
 ```
 <main folder>\
@@ -254,8 +254,8 @@ cargo run --release -- --downloads             # focus the downloader panel
 cargo run --release -- --download "https://www.youtube.com/playlist?list=..."
 ```
 
-The built binary is `target\release\def_player.exe` (a copy is in the project root as
-`Def Player.exe`).
+The built binary is `target\release\br1_player.exe` (a copy is in the project root as
+`BR1 Player.exe`).
 
 ## Downloads: what is needed
 
@@ -269,10 +269,10 @@ repository — some are larger than GitHub's file size limit):
 | `ffmpeg.exe` + `ffprobe.exe` | audio extraction, MP3 encoding, embedding cover art |
 | `av*.dll`, `sw*.dll` | shared libraries required by shared-build ffmpeg (e.g. `avcodec-63.dll`) |
 
-Put them in `bin\` next to `Def Player.exe`:
+Put them in `bin\` next to `BR1 Player.exe`:
 
 ```
-Def Player.exe
+BR1 Player.exe
 bin\
     yt-dlp.exe
     spotdl.exe
