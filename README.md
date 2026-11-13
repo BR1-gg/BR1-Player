@@ -301,6 +301,8 @@ terms of service of the sites you use.
 | `src/theme.rs` | gradient/glass painting helpers and colour mixing |
 | `src/glass.rs` | liquid-glass material resolution, scene collection and native fallback painting |
 | `src/ui.rs` | custom-painted widgets and glyphs |
+| `assets/icon.png` | icon artwork (auto-cropped and turned into `assets/icon.ico` by `tools/make-icon.ps1`) |
+| `build.rs` | embeds the icon and version info into the exe with the Windows SDK `rc.exe` |
 | `src/visualizer.rs` | small FFT used by the spectrum view |
 
 ## Notes / next steps
