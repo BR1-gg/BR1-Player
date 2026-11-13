@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use egui::{
@@ -10,6 +10,7 @@ use egui::{
 
 use crate::audio::{AudioEngine, EQ_FREQS};
 use crate::config::{self, Config, GlassPreset, GlassShape, UiConfig, EQ_BANDS};
+use crate::deps;
 use crate::download;
 use crate::glass::GlassSlot;
 use crate::library::{self, Track};
@@ -28,8 +29,17 @@ enum Repeat {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
+    Installing,
     Setup,
     Dashboard,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InstallRow {
+    Done,
+    Current,
+    Waiting,
+    Failed,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -114,8 +124,32 @@ impl SettingsTab {
     }
 }
 
+/// Progress of the first-run tool installation shown on the loading screen.
+struct InstallState {
+    receiver: Option<Receiver<deps::Event>>,
+    status: String,
+    fraction: Option<f32>,
+    tool: usize,
+    error: Option<String>,
+}
+
+impl Default for InstallState {
+    fn default() -> Self {
+        Self {
+            receiver: None,
+            status: "Connecting…".to_string(),
+            fraction: Some(0.0),
+            tool: 0,
+            error: None,
+        }
+    }
+}
+
 pub struct PlayerApp {
     view: View,
+    configured: bool,
+    install: InstallState,
+    initial_paths: Vec<PathBuf>,
     tracks: Vec<Track>,
     visible: Vec<usize>,
     active_playlist: Option<String>,
@@ -203,12 +237,19 @@ impl PlayerApp {
             parallel: config.parallel,
         });
 
+        let installing = !deps::ready();
+
         let mut app = Self {
-            view: if configured {
+            view: if installing {
+                View::Installing
+            } else if configured {
                 View::Dashboard
             } else {
                 View::Setup
             },
+            configured,
+            install: InstallState::default(),
+            initial_paths,
             tracks: Vec::new(),
             visible: Vec::new(),
             active_playlist: None,
@@ -260,9 +301,11 @@ impl PlayerApp {
             drop_hovering: false,
         };
 
-        if configured {
+        if installing {
+            app.start_install();
+        } else if configured {
             let mut scan_paths = vec![app.library_root.clone()];
-            scan_paths.extend(initial_paths);
+            scan_paths.extend(std::mem::take(&mut app.initial_paths));
             app.start_scan(scan_paths);
 
             if let Some(url) = app.pending_url.take() {
@@ -743,6 +786,81 @@ impl PlayerApp {
         }
     }
 
+    /* ---------- first-run tool installation ---------- */
+
+    fn start_install(&mut self) {
+        self.install = InstallState::default();
+        self.install.receiver = Some(deps::start());
+        self.status = None;
+        self.view = View::Installing;
+    }
+
+    fn poll_install(&mut self, ctx: &egui::Context) {
+        let Some(receiver) = self.install.receiver.take() else {
+            return;
+        };
+
+        let mut finished = None;
+        loop {
+            match receiver.try_recv() {
+                Ok(deps::Event::Progress {
+                    tool,
+                    status,
+                    fraction,
+                }) => {
+                    self.install.tool = tool;
+                    self.install.status = status;
+                    self.install.fraction = fraction;
+                }
+                Ok(deps::Event::Finished(result)) => {
+                    finished = Some(result);
+                    break;
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    finished = Some(Err("The setup stopped unexpectedly.".to_string()));
+                    break;
+                }
+            }
+        }
+
+        match finished {
+            Some(Ok(())) => {
+                self.install.error = None;
+                self.finish_install();
+            }
+            Some(Err(err)) => {
+                self.install.error = Some(err);
+                self.install.fraction = None;
+                self.install.status = "Setup did not finish.".to_string();
+            }
+            None => {
+                self.install.receiver = Some(receiver);
+                ctx.request_repaint_after(Duration::from_millis(80));
+            }
+        }
+    }
+
+    /// Leaves the loading screen: the dashboard when the library is already
+    /// configured, otherwise the folder picker.
+    fn finish_install(&mut self) {
+        self.install = InstallState::default();
+
+        if self.configured {
+            self.view = View::Dashboard;
+            let mut scan_paths = vec![self.library_root.clone()];
+            scan_paths.extend(std::mem::take(&mut self.initial_paths));
+            self.start_scan(scan_paths);
+
+            if let Some(url) = self.pending_url.take() {
+                self.download_url = url;
+                self.start_download();
+            }
+        } else {
+            self.view = View::Setup;
+        }
+    }
+
     /* ---------- setup screen ---------- */
 
     fn setup_screen(&mut self, ui: &mut Ui, rect: Rect) {
@@ -867,6 +985,260 @@ impl PlayerApp {
         if let Some(status) = &self.download_status {
             child.label(egui::RichText::new(status).size(11.5).color(theme.danger()));
         }
+    }
+
+    /* ---------- loading screen ---------- */
+
+    fn install_screen(&mut self, ui: &mut Ui, rect: Rect) {
+        let theme = self.theme;
+        let width = (rect.width() * 0.58).clamp(430.0, 780.0);
+        let height = 402.0f32.min(rect.height() - 60.0).max(300.0);
+        let card = Rect::from_center_size(rect.center(), vec2(width, height));
+        theme::paint_card(
+            ui.painter(),
+            card,
+            theme.radius + 6.0,
+            &theme,
+            false,
+            false,
+            0,
+            false,
+        );
+
+        let inner = card.shrink2(vec2(30.0, 24.0));
+        let mut child = ui.new_child(
+            UiBuilder::new()
+                .max_rect(inner)
+                .layout(Layout::top_down(Align::Min))
+                .id_salt("install"),
+        );
+        child.set_clip_rect(inner);
+        child.spacing_mut().item_spacing = vec2(8.0, 8.0);
+
+        let failed = self.install.error.is_some();
+        let finished = self.install.receiver.is_none() && !failed;
+
+        child.label(
+            egui::RichText::new("BR1 PLAYER")
+                .size(11.0)
+                .color(theme.muted())
+                .strong(),
+        );
+        child.add_space(4.0);
+        child.label(
+            egui::RichText::new(if failed {
+                "Setup did not finish."
+            } else {
+                "Getting things ready."
+            })
+            .size(27.0)
+            .color(theme.text())
+            .strong(),
+        );
+        child.add_space(3.0);
+        child.label(
+            egui::RichText::new(
+                "First run only: BR1 Player downloads the tools it uses to find, convert and tag music. They are stored in a bin folder next to the app and reused every time after that.",
+            )
+            .size(12.5)
+            .color(theme.muted()),
+        );
+        child.add_space(12.0);
+
+        let time = child.input(|input| input.time);
+        for index in 0..deps::count() {
+            let state = if finished || index < self.install.tool {
+                InstallRow::Done
+            } else if index > self.install.tool {
+                InstallRow::Waiting
+            } else if failed {
+                InstallRow::Failed
+            } else {
+                InstallRow::Current
+            };
+            Self::install_row(&mut child, index, &theme, state, time);
+        }
+
+        child.add_space(8.0);
+
+        let (bar_rect, _) =
+            child.allocate_exact_size(vec2(child.available_width(), 7.0), Sense::hover());
+        ui::progress_bar(
+            child.painter(),
+            bar_rect,
+            if finished {
+                Some(1.0)
+            } else {
+                self.install.fraction
+            },
+            theme.accent_a,
+            time,
+            &theme,
+        );
+        child.add_space(4.0);
+
+        let row_width = child.available_width();
+        let (line_rect, _) = child.allocate_exact_size(vec2(row_width, 16.0), Sense::hover());
+        let font = FontId::proportional(11.0);
+        child.painter().text(
+            pos2(line_rect.left(), line_rect.center().y),
+            Align2::LEFT_CENTER,
+            ui::ellipsize(
+                child.painter(),
+                &self.install.status,
+                &font,
+                if failed {
+                    theme.danger()
+                } else {
+                    theme.muted()
+                },
+                row_width - 52.0,
+            ),
+            font.clone(),
+            if failed {
+                theme.danger()
+            } else {
+                theme.muted()
+            },
+        );
+        if let Some(fraction) = self.install.fraction.filter(|_| !failed) {
+            child.painter().text(
+                pos2(line_rect.right(), line_rect.center().y),
+                Align2::RIGHT_CENTER,
+                format!("{:.0}%", fraction * 100.0),
+                font,
+                theme.faint(),
+            );
+        }
+
+        if failed {
+            child.add_space(2.0);
+            child.label(
+                egui::RichText::new(
+                    self.install
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "Unknown error".to_string()),
+                )
+                .size(11.0)
+                .color(theme.danger()),
+            );
+        }
+
+        child.add_space(10.0);
+        let mut retry = false;
+        let mut skip = false;
+        child.horizontal(|ui| {
+            if failed {
+                if ui::pill_button_sized(ui, 130.0, "Try again", true, &theme, GlassSlot::Setup)
+                    .clicked()
+                {
+                    retry = true;
+                }
+                if ui::pill_button_sized(
+                    ui,
+                    210.0,
+                    "Continue without tools",
+                    false,
+                    &theme,
+                    GlassSlot::Setup,
+                )
+                .clicked()
+                {
+                    skip = true;
+                }
+            } else if ui::pill_button_sized(
+                ui,
+                140.0,
+                "Skip for now",
+                false,
+                &theme,
+                GlassSlot::Setup,
+            )
+            .clicked()
+            {
+                skip = true;
+            }
+        });
+
+        if retry {
+            self.start_install();
+        } else if skip {
+            self.finish_install();
+        }
+    }
+
+    fn install_row(ui: &mut Ui, index: usize, theme: &Theme, state: InstallRow, time: f64) {
+        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::hover());
+        let painter = ui.painter();
+        let center = pos2(rect.left() + 7.0, rect.center().y);
+
+        match state {
+            InstallRow::Done => {
+                let color = theme::with_alpha(theme.accent_b, 225);
+                painter.circle_filled(center, 6.0, color);
+                painter.line_segment(
+                    [center + vec2(-2.6, 0.2), center + vec2(-0.6, 2.2)],
+                    Stroke::new(1.5_f32, Color32::from_rgb(8, 10, 14)),
+                );
+                painter.line_segment(
+                    [center + vec2(-0.6, 2.2), center + vec2(2.8, -2.4)],
+                    Stroke::new(1.5_f32, Color32::from_rgb(8, 10, 14)),
+                );
+            }
+            InstallRow::Current => {
+                let pulse = 0.5 + 0.5 * (time * 3.0).sin() as f32;
+                painter.circle_stroke(
+                    center,
+                    5.0 + pulse * 0.8,
+                    Stroke::new(1.6_f32, theme.accent_a),
+                );
+            }
+            InstallRow::Waiting => {
+                painter.circle_stroke(
+                    center,
+                    5.0,
+                    Stroke::new(1.0_f32, theme::with_alpha(theme.text(), 60)),
+                );
+            }
+            InstallRow::Failed => {
+                painter.circle_stroke(center, 5.2, Stroke::new(1.6_f32, theme.danger()));
+                painter.line_segment(
+                    [center + vec2(-2.0, -2.0), center + vec2(2.0, 2.0)],
+                    Stroke::new(1.4_f32, theme.danger()),
+                );
+                painter.line_segment(
+                    [center + vec2(2.0, -2.0), center + vec2(-2.0, 2.0)],
+                    Stroke::new(1.4_f32, theme.danger()),
+                );
+            }
+        }
+
+        let label = deps::label(index);
+        painter.text(
+            pos2(rect.left() + 20.0, rect.center().y),
+            Align2::LEFT_CENTER,
+            label,
+            FontId::proportional(12.5),
+            match state {
+                InstallRow::Waiting => theme.faint(),
+                _ => theme.text(),
+            },
+        );
+
+        let (word, color) = match state {
+            InstallRow::Done => ("installed", theme.faint()),
+            InstallRow::Current => ("downloading", theme.muted()),
+            InstallRow::Waiting => ("waiting", theme.faint()),
+            InstallRow::Failed => ("failed", theme.danger()),
+        };
+        painter.text(
+            pos2(rect.right(), rect.center().y),
+            Align2::RIGHT_CENTER,
+            word,
+            FontId::proportional(11.0),
+            color,
+        );
     }
 
     /* ---------- textures ---------- */
@@ -1013,6 +1385,9 @@ impl PlayerApp {
     /* ---------- input ---------- */
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
+        if self.view == View::Installing {
+            return;
+        }
         let (escape, search, layout, settings) = ctx.input(|input| {
             (
                 input.key_pressed(egui::Key::Escape),
@@ -4783,11 +5158,27 @@ impl PlayerApp {
         ui.label(
             egui::RichText::new(match tools {
                 Some(ref path) => format!("Tools found in {}", path.display()),
-                None => "Tools not found. Put yt-dlp, spotdl and ffmpeg in the bin folder next to the exe.".to_string(),
+                None => "Tools not found. BR1 Player can download yt-dlp, spotdl and FFmpeg for you.".to_string(),
             })
             .size(10.5)
             .color(if tools.is_some() { theme.muted() } else { theme.danger() }),
         );
+        if tools.is_none() {
+            ui.add_space(6.0);
+            if ui::pill_button_sized(
+                ui,
+                150.0,
+                "Download tools",
+                true,
+                theme,
+                GlassSlot::SettingsControl,
+            )
+            .clicked()
+            {
+                self.settings_open = false;
+                self.start_install();
+            }
+        }
         ui.add_space(6.0);
         if ui::pill_button_sized(
             ui,
@@ -4890,6 +5281,7 @@ impl PlayerApp {
 
         self.poll_scan(ctx);
         self.poll_download(ctx);
+        self.poll_install(ctx);
         self.tick(ctx);
         self.handle_keys(ctx);
         self.ensure_textures(ctx);
@@ -5044,6 +5436,10 @@ impl PlayerApp {
             .frame(egui::Frame::NONE.fill(Color32::TRANSPARENT))
             .show(ui, |ui| {
                 let rect = ui.max_rect();
+                if self.view == View::Installing {
+                    self.install_screen(ui, rect);
+                    return;
+                }
                 if self.view == View::Setup {
                     self.setup_screen(ui, rect);
                     return;

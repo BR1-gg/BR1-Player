@@ -3,6 +3,7 @@
 mod app;
 mod audio;
 mod config;
+mod deps;
 mod download;
 mod glass;
 mod library;

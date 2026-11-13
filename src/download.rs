@@ -62,6 +62,10 @@ pub fn tools_dir() -> Option<PathBuf> {
     if let Ok(cwd) = std::env::current_dir() {
         candidates.push(cwd.join("bin"));
     }
+    // Fallback for installs whose own folder is read-only (Program Files).
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        candidates.push(PathBuf::from(local).join("BR1 Player").join("bin"));
+    }
 
     candidates
         .into_iter()
@@ -406,7 +410,8 @@ pub fn yt_dlp_playlist_cover(url: &str, root: &Path, subfolder: &str) -> Result<
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 fn missing_tools() -> String {
-    "Download tools not found. Put yt-dlp.exe, spotdl.exe and ffmpeg.exe in a \"bin\" folder next to the player.".to_string()
+    "Download tools are missing. Open Settings → Downloads → Download tools to install them."
+        .to_string()
 }
 
 fn spawn(

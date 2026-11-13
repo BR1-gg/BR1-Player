@@ -17,6 +17,8 @@ rodio = "0.22.2"
 lofty = "0.22.4"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "bmp", "webp"] }
 rfd = "0.15.4"
+ureq = { version = "3.5", default-features = false, features = ["native-tls"] }
+zip = { version = "9.5", default-features = false, features = ["deflate"] }
 
 [profile.release]
 opt-level = 2

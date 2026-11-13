@@ -157,8 +157,10 @@ All glass values are stored in `config.txt` under keys beginning with
 
 ## What it does
 
-- **First-run setup** — you choose the main music folder before anything else happens.
-  That folder is where all downloads go and where the library is scanned from.
+- **First-run setup** — the app installs its download tools once (see
+  [First run](#first-run) below), then you choose the main music folder before anything
+  else happens. That folder is where all downloads go and where the library is
+  scanned from.
 - **Library** — add single files or whole folders (recursive scan), or drag & drop onto the window.
 - **Playlists** — every subfolder of your main folder is a playlist, shown as a cover card
   with its own artwork and track count. Click one to filter the library; the player and
@@ -247,7 +249,7 @@ window and layout editor; you normally do not need to edit them by hand.
 ## Run
 
 ```powershell
-cargo run --release                  # first run asks for your music folder
+cargo run --release                  # first run installs the tools, then asks for your music folder
 cargo run --release -- "C:\Music"    # scan an extra folder at startup
 cargo run --release -- "C:\Music" --play
 cargo run --release -- --downloads             # focus the downloader panel
@@ -259,17 +261,33 @@ The built binary is `target\release\br1_player.exe` (a copy is in the project ro
 
 ## Downloads: what is needed
 
-The downloader needs these tools in a `bin` folder next to the exe (they are **not** in this
-repository — some are larger than GitHub's file size limit):
+The downloader needs these tools:
 
 | Tool | Used for |
 | --- | --- |
 | `yt-dlp.exe` | YouTube (and most other sites) playlists, albums, videos |
 | `spotdl.exe` | Spotify playlists / albums / tracks (finds matching audio, saves MP3) |
-| `ffmpeg.exe` + `ffprobe.exe` | audio extraction, MP3 encoding, embedding cover art |
-| `av*.dll`, `sw*.dll` | shared libraries required by shared-build ffmpeg (e.g. `avcodec-63.dll`) |
+| `ffmpeg.exe` + `ffprobe.exe` | audio extraction, MP3 encoding, embedding cover art, video backgrounds |
 
-Put them in `bin\` next to `BR1 Player.exe`:
+**You normally do not install them by hand.** The exe ships without them and fetches
+them itself the first time it starts (see [First run](#first-run)). The app looks for
+the tools in `bin` next to the executable, then in `%LOCALAPPDATA%\BR1 Player\bin`,
+then in the working directory, then on `PATH`. The player itself works without them;
+only the downloader panel and the video background need them.
+
+### First run
+
+On the very first start (or any start where a tool is missing) a loading screen appears
+and the exe downloads the three tools into `bin` next to itself:
+
+- `yt-dlp.exe` from the yt-dlp GitHub release
+- `spotdl.exe` from the spotDL GitHub release (the newest Windows build)
+- `ffmpeg.exe` + `ffprobe.exe` unpacked from the FFmpeg essentials build
+
+Progress is shown per tool, with an overall percentage. If a download fails you can
+retry or continue without the tools and add them later from
+**Settings → Downloads → Download tools** (or by dropping the executables into `bin`
+next to `BR1 Player.exe`):
 
 ```
 BR1 Player.exe
@@ -278,11 +296,10 @@ bin\
     spotdl.exe
     ffmpeg.exe
     ffprobe.exe
-    avcodec-63.dll ...
 ```
 
-The app looks for the tools in `bin` next to the executable, then in the working directory,
-then on `PATH`. The player itself works without `bin`; only the downloader panel needs it.
+When the player folder is read-only (for example under `Program Files`) the tools go
+to `%LOCALAPPDATA%\BR1 Player\bin` instead.
 
 Only download content you have the rights to; you are responsible for respecting the
 terms of service of the sites you use.
@@ -296,6 +313,7 @@ terms of service of the sites you use.
 | `src/audio.rs` | rodio playback engine, live 10-band EQ and visualizer tap |
 | `src/library.rs` | folder scanning, tag + cover extraction |
 | `src/download.rs` | yt-dlp / spotdl process handling, progress parsing |
+| `src/deps.rs` | first-run installer that downloads yt-dlp, spotdl and FFmpeg into `bin` |
 | `src/queue.rs` | parallel download queue, per-job progress and cancellation |
 | `src/config.rs` | folder, quality, theme, dashboard layout and EQ settings (`%APPDATA%\DefPlayer\config.txt`) |
 | `src/theme.rs` | gradient/glass painting helpers and colour mixing |
