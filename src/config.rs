@@ -419,6 +419,14 @@ pub struct UiConfig {
     pub room_size: f32,
     /// Reverb wet level, 0..1.
     pub reverb: f32,
+    /// Source height above the listener's ears, in metres (-2.5..2.5).
+    pub spatial_height: f32,
+    /// Listener head yaw in degrees (-180..180, positive to the right).
+    pub head_yaw: f32,
+    /// True for true binaural HRTF rendering, false for the old stereo pan.
+    pub hrtf_enabled: bool,
+    /// Identifier of the selected HRTF set (`builtin:studio` or `sofa:...`).
+    pub hrtf_set: String,
     pub volume: f32,
     pub muted: bool,
     /// Apple-style liquid glass for the selected component groups.
@@ -481,6 +489,10 @@ impl Default for UiConfig {
             spatial_y: 0.0,
             room_size: 8.0,
             reverb: 0.0,
+            spatial_height: 0.0,
+            head_yaw: 0.0,
+            hrtf_enabled: true,
+            hrtf_set: "builtin:studio".to_string(),
             volume: 0.8,
             muted: false,
             liquid: GlassConfig::default(),
@@ -612,6 +624,7 @@ pub fn load_from(path: &Path) -> Option<Config> {
     let mut quality = DEFAULT_QUALITY;
     let mut parallel = DEFAULT_PARALLEL;
     let mut ui = UiConfig::default();
+    let mut has_hrtf_settings = false;
 
     for line in text.lines() {
         let Some((key, value)) = line.split_once('=') else {
@@ -741,6 +754,25 @@ pub fn load_from(path: &Path) -> Option<Config> {
                     ui.reverb = parsed.clamp(0.0, 1.0);
                 }
             }
+            "ui_spatial_height" => {
+                if let Ok(parsed) = value.parse::<f32>() {
+                    ui.spatial_height = parsed.clamp(-2.5, 2.5);
+                }
+            }
+            "ui_head_yaw" => {
+                if let Ok(parsed) = value.parse::<f32>() {
+                    ui.head_yaw = parsed.clamp(-180.0, 180.0);
+                }
+            }
+            "ui_hrtf_enabled" => {
+                ui.hrtf_enabled = parse_bool(value);
+                has_hrtf_settings = true;
+            }
+            "ui_hrtf_set" => {
+                if !value.is_empty() {
+                    ui.hrtf_set = value.to_string();
+                }
+            }
             "volume" => {
                 if let Ok(parsed) = value.parse::<f32>() {
                     ui.volume = parsed.clamp(0.0, 1.0);
@@ -846,6 +878,15 @@ pub fn load_from(path: &Path) -> Option<Config> {
         }
     }
 
+    if !has_hrtf_settings {
+        // Configs written before the HRTF feature stored a normalized 2-D
+        // pan position. That position has no physical meaning in the new
+        // scene, so start those users in front at the minimum distance.
+        ui.spatial_x = 0.0;
+        ui.spatial_y = 0.0;
+        ui.spatial_height = 0.0;
+    }
+
     root.map(|library_root| Config {
         library_root,
         quality,
@@ -884,6 +925,10 @@ pub fn save_to(path: &Path, config: &Config) {
          ui_spatial_y={:.4}\n\
          ui_room_size={:.2}\n\
          ui_reverb={:.3}\n\
+         ui_spatial_height={:.3}\n\
+         ui_head_yaw={:.2}\n\
+         ui_hrtf_enabled={}\n\
+         ui_hrtf_set={}\n\
          volume={:.3}\n\
          muted={}\n",
         config.library_root.display(),
@@ -930,6 +975,10 @@ pub fn save_to(path: &Path, config: &Config) {
         ui.spatial_y,
         ui.room_size,
         ui.reverb,
+        ui.spatial_height,
+        ui.head_yaw,
+        if ui.hrtf_enabled { 1 } else { 0 },
+        ui.hrtf_set,
         ui.volume,
         if ui.muted { 1 } else { 0 },
     );
@@ -1154,18 +1203,18 @@ mod tests {
         assert_eq!(loaded.ui.background_dim, 0.4);
         assert_eq!(loaded.ui.eq_gains[3], 4.5);
         assert_eq!(loaded.ui.liquid.transparency, 0.75);
-        assert_eq!(loaded.ui.liquid.dark, false);
-        assert_eq!(loaded.ui.liquid.tint_enabled, true);
+        assert!(!loaded.ui.liquid.dark);
+        assert!(loaded.ui.liquid.tint_enabled);
         assert_eq!(loaded.ui.liquid.tint_color, [10, 20, 30]);
         assert_eq!(loaded.ui.liquid.tint_strength, 0.5);
         assert_eq!(loaded.ui.liquid.shape, GlassShape::Smooth);
         assert_eq!(loaded.ui.liquid.shape_radius, 24.0);
         assert_eq!(loaded.ui.liquid.smoothing, 0.6);
-        assert_eq!(loaded.ui.liquid.targets.top_bar, true);
-        assert_eq!(loaded.ui.liquid.targets.setup, true);
+        assert!(loaded.ui.liquid.targets.top_bar);
+        assert!(loaded.ui.liquid.targets.setup);
         assert_eq!(loaded.ui.liquid.dark_tone.lift, 0.125);
-        assert_eq!(loaded.ui.liquid.targets.transport, true);
-        assert_eq!(loaded.ui.liquid.targets.settings_controls, false);
+        assert!(loaded.ui.liquid.targets.transport);
+        assert!(!loaded.ui.liquid.targets.settings_controls);
     }
 
     #[test]
@@ -1199,6 +1248,28 @@ mod tests {
         assert!(glass.tint_enabled);
         assert_eq!(glass.tint_color, [0, 136, 255]);
         assert!(glass.targets.top_bar);
+    }
+
+    #[test]
+    fn legacy_spatial_position_is_centered_for_hrtf() {
+        let dir = std::env::temp_dir().join("defplayer_config_legacy_spatial");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.txt");
+        std::fs::write(
+            &path,
+            "library_root=C:\\Music\nui_spatial_x=0.7000\nui_spatial_y=-0.8000\n\
+             ui_room_size=7.20\nui_reverb=0.100\n",
+        )
+        .unwrap();
+
+        let loaded = load_from(&path).expect("config should load");
+        assert_eq!(loaded.ui.spatial_x, 0.0);
+        assert_eq!(loaded.ui.spatial_y, 0.0);
+        assert_eq!(loaded.ui.spatial_height, 0.0);
+        assert_eq!(loaded.ui.room_size, 7.2);
+        assert_eq!(loaded.ui.reverb, 0.1);
+        assert!(loaded.ui.hrtf_enabled);
     }
 
     #[test]

@@ -15,6 +15,7 @@ use crate::download;
 use crate::glass::GlassSlot;
 use crate::library::{self, Track};
 use crate::queue::{self, JobState};
+use crate::spatial::{self, TestMode};
 use crate::theme::{self, Theme};
 use crate::ui::{self, Glyph};
 use crate::video_bg::VideoBackground;
@@ -131,6 +132,7 @@ struct InstallState {
     fraction: Option<f32>,
     tool: usize,
     error: Option<String>,
+    first_run: bool,
 }
 
 impl Default for InstallState {
@@ -141,6 +143,7 @@ impl Default for InstallState {
             fraction: Some(0.0),
             tool: 0,
             error: None,
+            first_run: false,
         }
     }
 }
@@ -213,7 +216,7 @@ impl PlayerApp {
     ) -> Self {
         let mut saved = config::load();
         let configured = saved.is_some();
-        let config = saved
+        let mut config = saved
             .take()
             .unwrap_or_else(|| Config::with_root(config::default_library_root()));
         let mut theme = Theme::from_ui(&config.ui);
@@ -221,12 +224,9 @@ impl PlayerApp {
         configure_style(egui_ctx, &theme);
 
         let (audio, status) = match AudioEngine::new() {
-            Ok(engine) => {
-                engine.set_eq(&config.ui.eq_gains, config.ui.eq_enabled);
-                engine.set_spatial(config.ui.spatial_x, config.ui.spatial_y);
-                engine.set_room_size(config.ui.room_size);
-                engine.set_reverb(config.ui.reverb);
-                (Some(engine), None)
+            Ok(mut engine) => {
+                let warning = engine.configure(&mut config.ui);
+                (Some(engine), warning)
             }
             Err(err) => (None, Some(err)),
         };
@@ -237,7 +237,7 @@ impl PlayerApp {
             parallel: config.parallel,
         });
 
-        let installing = !deps::ready();
+        let installing = deps::needs_first_run();
 
         let mut app = Self {
             view: if installing {
@@ -789,7 +789,10 @@ impl PlayerApp {
     /* ---------- first-run tool installation ---------- */
 
     fn start_install(&mut self) {
-        self.install = InstallState::default();
+        self.install = InstallState {
+            first_run: deps::needs_first_run(),
+            ..InstallState::default()
+        };
         self.install.receiver = Some(deps::start());
         self.status = None;
         self.view = View::Installing;
@@ -826,6 +829,9 @@ impl PlayerApp {
 
         match finished {
             Some(Ok(())) => {
+                if let Err(err) = deps::mark_first_run_complete() {
+                    self.notice(format!("Could not save first-run state: {err}"), true);
+                }
                 self.install.error = None;
                 self.finish_install();
             }
@@ -844,7 +850,47 @@ impl PlayerApp {
     /// Leaves the loading screen: the dashboard when the library is already
     /// configured, otherwise the folder picker.
     fn finish_install(&mut self) {
+        let first_run = self.install.first_run;
         self.install = InstallState::default();
+
+        if let Some(audio) = &mut self.audio {
+            audio.rescan_hrtf_sets();
+        }
+        if first_run {
+            // The engine scanned the HRTF folder before the measured sets were
+            // downloaded, so refresh the list. A brand-new profile starts with
+            // KEMAR; existing configs keep the set the user already chose.
+            let available = self
+                .audio
+                .as_ref()
+                .map(|audio| {
+                    audio
+                        .hrtf_sets()
+                        .iter()
+                        .any(|set| set.id == spatial::KEMAR_NORMAL_ID)
+                })
+                .unwrap_or(false);
+            if !self.configured
+                && available
+                && self.config.ui.hrtf_set == spatial::DEFAULT_SET_ID
+            {
+                self.config.ui.hrtf_set = spatial::KEMAR_NORMAL_ID.to_string();
+                if !self.apply_hrtf_set() {
+                    self.config.ui.hrtf_set = spatial::DEFAULT_SET_ID.to_string();
+                }
+            }
+        } else {
+            // A repair install can restore a set that was missing at startup.
+            let current = self.config.ui.hrtf_set.clone();
+            let available = self
+                .audio
+                .as_ref()
+                .map(|audio| audio.hrtf_sets().iter().any(|set| set.id == current))
+                .unwrap_or(false);
+            if available {
+                self.apply_hrtf_set();
+            }
+        }
 
         if self.configured {
             self.view = View::Dashboard;
@@ -992,7 +1038,7 @@ impl PlayerApp {
     fn install_screen(&mut self, ui: &mut Ui, rect: Rect) {
         let theme = self.theme;
         let width = (rect.width() * 0.58).clamp(430.0, 780.0);
-        let height = 402.0f32.min(rect.height() - 60.0).max(300.0);
+        let height = 440.0f32.min(rect.height() - 60.0).max(320.0);
         let card = Rect::from_center_size(rect.center(), vec2(width, height));
         theme::paint_card(
             ui.painter(),
@@ -1038,7 +1084,7 @@ impl PlayerApp {
         child.add_space(3.0);
         child.label(
             egui::RichText::new(
-                "First run only: BR1 Player downloads the tools it uses to find, convert and tag music. They are stored in a bin folder next to the app and reused every time after that.",
+                "First run only: BR1 Player downloads the tools it uses to find, convert and tag music, plus two measured KEMAR HRTF sets for binaural headphone audio. They are stored in bin/ and %APPDATA%\\DefPlayer\\hrtf and reused every time after that.",
             )
             .size(12.5)
             .color(theme.muted()),
@@ -1128,17 +1174,24 @@ impl PlayerApp {
         child.add_space(10.0);
         let mut retry = false;
         let mut skip = false;
-        child.horizontal(|ui| {
-            if failed {
-                if ui::pill_button_sized(ui, 130.0, "Try again", true, &theme, GlassSlot::Setup)
-                    .clicked()
+        if failed {
+            child.horizontal(|ui| {
+                if ui::pill_button_sized(
+                    ui,
+                    130.0,
+                    "Try again",
+                    true,
+                    &theme,
+                    GlassSlot::Setup,
+                )
+                .clicked()
                 {
                     retry = true;
                 }
                 if ui::pill_button_sized(
                     ui,
-                    210.0,
-                    "Continue without tools",
+                    230.0,
+                    "Continue without downloads",
                     false,
                     &theme,
                     GlassSlot::Setup,
@@ -1147,23 +1200,15 @@ impl PlayerApp {
                 {
                     skip = true;
                 }
-            } else if ui::pill_button_sized(
-                ui,
-                140.0,
-                "Skip for now",
-                false,
-                &theme,
-                GlassSlot::Setup,
-            )
-            .clicked()
-            {
-                skip = true;
-            }
-        });
+            });
+        }
 
         if retry {
             self.start_install();
         } else if skip {
+            if let Err(err) = deps::mark_first_run_complete() {
+                self.notice(format!("Could not save first-run state: {err}"), true);
+            }
             self.finish_install();
         }
     }
@@ -3137,11 +3182,56 @@ impl PlayerApp {
         self.visualizer_view(ui);
     }
 
-    fn apply_spatial(&self) {
-        if let Some(audio) = &self.audio {
-            audio.set_spatial(self.config.ui.spatial_x, self.config.ui.spatial_y);
+    fn apply_spatial(&mut self) {
+        if let Some(audio) = &mut self.audio {
+            audio.set_source_position(spatial::position_from_pad(
+                self.config.ui.spatial_x,
+                self.config.ui.spatial_y,
+                self.config.ui.spatial_height,
+                self.config.ui.room_size,
+            ));
             audio.set_room_size(self.config.ui.room_size);
             audio.set_reverb(self.config.ui.reverb);
+            audio.set_head_yaw(self.config.ui.head_yaw);
+            audio.set_hrtf_enabled(self.config.ui.hrtf_enabled);
+        }
+    }
+
+    fn apply_hrtf_set(&mut self) -> bool {
+        let id = self.config.ui.hrtf_set.clone();
+        let result = self.audio.as_mut().map(|audio| audio.set_hrtf_set(&id));
+        match result {
+            Some(Ok(())) => true,
+            Some(Err(error)) => {
+                self.notice(format!("HRTF: {error}"), true);
+                false
+            }
+            None => false,
+        }
+    }
+
+    fn cycle_hrtf_set(&mut self) {
+        let sets = self
+            .audio
+            .as_ref()
+            .map(|audio| audio.hrtf_sets().to_vec())
+            .unwrap_or_default();
+        if sets.is_empty() {
+            return;
+        }
+        let current = self
+            .audio
+            .as_ref()
+            .map(|audio| audio.hrtf_set_id().to_string())
+            .unwrap_or_else(|| self.config.ui.hrtf_set.clone());
+        let index = sets.iter().position(|set| set.id == current).unwrap_or(0);
+        let next = &sets[(index + 1) % sets.len()];
+        let previous = self.config.ui.hrtf_set.clone();
+        self.config.ui.hrtf_set = next.id.clone();
+        if self.apply_hrtf_set() {
+            self.save_config();
+        } else {
+            self.config.ui.hrtf_set = previous;
         }
     }
 
@@ -3177,10 +3267,12 @@ impl PlayerApp {
         ui::slider(ui, slider, id, fraction, true, theme)
     }
 
-    /// Draggable speaker around the listener, plus room size and reverb.
+    /// Binaural speaker pad: drag to move the object, height shows elevation,
+    /// the arrow shows head yaw. The chips switch HRTF/pan, the HRTF set and
+    /// the built-in test patterns.
     fn spatial_panel(&mut self, ui: &mut Ui) {
         let theme = self.theme;
-        let (head, _) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::hover());
+        let (head, _) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
         let painter = ui.painter();
         painter.text(
             pos2(head.left(), head.center().y),
@@ -3189,31 +3281,177 @@ impl PlayerApp {
             FontId::proportional(10.5),
             theme.muted(),
         );
+        let hrtf = self.config.ui.hrtf_enabled;
         painter.text(
             pos2(head.right(), head.center().y),
             Align2::RIGHT_CENTER,
-            format!("{:.1} m room", self.config.ui.room_size),
-            FontId::proportional(10.5),
+            if hrtf { "HRTF · BINAURAL" } else { "STEREO · PAN" },
+            FontId::proportional(10.0),
             theme.faint(),
         );
 
-        let area = ui.available_rect_before_wrap();
-        if area.width() < 60.0 || area.height() < 90.0 {
+        let full = ui.available_rect_before_wrap();
+        if full.width() < 210.0 || full.height() < 150.0 {
             return;
         }
 
-        let controls_height = 56.0;
-        let horizontal = area.width() > area.height() * 1.15;
-        let side = if horizontal {
-            (area.height() - 6.0).clamp(70.0, 460.0)
-        } else {
-            (area.width().min(area.height() - controls_height)).clamp(70.0, 460.0)
-        };
-        let canvas = Rect::from_min_size(area.min, vec2(side, side));
-        let center = canvas.center();
-        let radius = (side * 0.5 - 10.0).max(20.0);
+        let gap = 6.0;
+        let chip_height = 26.0;
+        let chip_width = ((full.width() - gap * 2.0) / 3.0).max(44.0);
+        let chip_y = head.bottom() + 4.0;
+        let mode_rect = Rect::from_min_size(pos2(full.left(), chip_y), vec2(chip_width, chip_height));
+        let set_rect = Rect::from_min_size(
+            pos2(mode_rect.right() + gap, chip_y),
+            vec2(chip_width, chip_height),
+        );
+        let test_rect = Rect::from_min_size(
+            pos2(set_rect.right() + gap, chip_y),
+            vec2(chip_width, chip_height),
+        );
 
-        // Room floor.
+        let test_mode = self
+            .audio
+            .as_ref()
+            .map(|audio| audio.test_mode())
+            .unwrap_or(TestMode::Off);
+        let set_label = self
+            .audio
+            .as_ref()
+            .and_then(|audio| {
+                let id = audio.hrtf_set_id();
+                audio
+                    .hrtf_sets()
+                    .iter()
+                    .find(|set| set.id == id)
+                    .map(|set| set.short.clone())
+            })
+            .unwrap_or_else(|| "SET".to_string());
+        let set_detail = self
+            .audio
+            .as_ref()
+            .and_then(|audio| {
+                let id = audio.hrtf_set_id();
+                audio
+                    .hrtf_sets()
+                    .iter()
+                    .find(|set| set.id == id)
+                    .map(|set| format!("{}\n{}", set.name, set.detail))
+            })
+            .unwrap_or_default();
+
+        if ui::chip(
+            ui,
+            mode_rect,
+            "spatial-mode",
+            if hrtf { "HRTF" } else { "PAN" },
+            hrtf,
+            &theme,
+            GlassSlot::SettingsControl,
+        )
+        .on_hover_text(
+            "HRTF: real binaural rendering (ITD, ILD, pinna and torso cues).\n\
+             PAN: the old amplitude panning, kept for A/B comparison.",
+        )
+        .clicked()
+        {
+            self.config.ui.hrtf_enabled = !hrtf;
+            self.apply_spatial();
+            self.save_config();
+        }
+
+        let set_response = ui::chip(
+            ui,
+            set_rect,
+            "spatial-set",
+            &set_label,
+            false,
+            &theme,
+            GlassSlot::SettingsControl,
+        )
+        .on_hover_text(format!(
+            "{set_detail}\n\nClick: next HRTF set.\nRight-click: rescan the folder.\n\nDrop SOFA files here:\n{}",
+            spatial::hrtf_folder().display()
+        ));
+        if set_response.secondary_clicked() {
+            let id = self.audio.as_mut().map(|audio| {
+                audio.rescan_hrtf_sets();
+                audio.hrtf_set_id().to_string()
+            });
+            if let Some(id) = id {
+                if self.config.ui.hrtf_set != id {
+                    self.config.ui.hrtf_set = id;
+                    self.save_config();
+                }
+            }
+        } else if set_response.clicked() {
+            self.cycle_hrtf_set();
+        }
+
+        let test_response = ui::chip(
+            ui,
+            test_rect,
+            "spatial-test",
+            test_mode.label(),
+            test_mode.active(),
+            &theme,
+            GlassSlot::SettingsControl,
+        )
+        .on_hover_text(
+            "Test object: front, back, above, below, horizontal orbit, vertical orbit, \
+             front/back sweep and left/right sweep.\nRight-click: stop.",
+        );
+        if test_response.secondary_clicked() {
+            if let Some(audio) = &mut self.audio {
+                audio.set_test_mode(TestMode::Off);
+            }
+        } else if test_response.clicked() {
+            if let Some(audio) = &mut self.audio {
+                audio.set_test_mode(test_mode.next());
+            }
+        }
+
+        let area = Rect::from_min_max(
+            pos2(full.left(), chip_y + chip_height + 6.0),
+            full.max,
+        );
+        if area.width() < 70.0 || area.height() < 110.0 {
+            return;
+        }
+
+        let row_height = 22.0;
+        let row_gap = 2.0;
+        let controls_height = row_height * 5.0 + row_gap * 4.0;
+        let horizontal = area.width() > area.height() + 150.0;
+        let (canvas, controls) = if horizontal {
+            let side = (area.height() - 4.0).clamp(70.0, 460.0);
+            let canvas = Rect::from_min_size(area.min, vec2(side, side));
+            let controls = Rect::from_min_max(
+                pos2(canvas.right() + 14.0, area.top()),
+                area.max,
+            );
+            (canvas, controls)
+        } else {
+            if area.height() < controls_height + 76.0 {
+                return;
+            }
+            let side = area
+                .width()
+                .min(area.height() - controls_height - 6.0)
+                .clamp(70.0, 460.0);
+            let canvas = Rect::from_min_size(
+                pos2(area.center().x - side * 0.5, area.top()),
+                vec2(side, side),
+            );
+            let controls = Rect::from_min_max(
+                pos2(area.left(), canvas.bottom() + 6.0),
+                area.max,
+            );
+            (canvas, controls)
+        };
+
+        let center = canvas.center();
+        let radius = (canvas.width().min(canvas.height()) * 0.5 - 10.0).max(20.0);
+
         theme::gradient_rect(
             ui.painter(),
             canvas,
@@ -3250,14 +3488,71 @@ impl PlayerApp {
             );
         }
 
-        let x = self.config.ui.spatial_x.clamp(-1.0, 1.0);
-        let y = self.config.ui.spatial_y.clamp(-1.0, 1.0);
-        let speaker = pos2(center.x + x * radius, center.y + y * radius);
-
-        // Link between listener and speaker.
+        // Head yaw arrow.
+        let yaw = self.config.ui.head_yaw.to_radians();
+        let forward = vec2(yaw.sin(), -yaw.cos());
+        let arrow_length = (radius * 0.22).max(14.0);
+        let arrow_end = center + forward * arrow_length;
+        let back = -forward;
+        let perp = vec2(-forward.y, forward.x);
+        let arrow_color = theme::with_alpha(theme.text(), 150);
         ui.painter().line_segment(
-            [center, speaker],
-            Stroke::new(1.4_f32, theme::with_alpha(theme.accent_b, 150)),
+            [center, arrow_end],
+            Stroke::new(1.4_f32, arrow_color),
+        );
+        ui.painter().line_segment(
+            [arrow_end, arrow_end + back * 6.0 + perp * 3.6],
+            Stroke::new(1.3_f32, arrow_color),
+        );
+        ui.painter().line_segment(
+            [arrow_end, arrow_end + back * 6.0 - perp * 3.6],
+            Stroke::new(1.3_f32, arrow_color),
+        );
+
+        let fallback = spatial::position_from_pad(
+            self.config.ui.spatial_x,
+            self.config.ui.spatial_y,
+            self.config.ui.spatial_height,
+            self.config.ui.room_size,
+        );
+        let position = if test_mode.active() {
+            self.audio
+                .as_ref()
+                .map(|audio| audio.spatial_position())
+                .unwrap_or(fallback)
+        } else {
+            fallback
+        };
+        let scene = spatial::scene(position, self.config.ui.head_yaw, 0.0, 0.0);
+        let (x, y) = spatial::pad_from_position(position, self.config.ui.room_size);
+        let planar = pos2(center.x + x * radius, center.y - y * radius);
+        let height_px = (position[1] / 2.5).clamp(-1.0, 1.0) * radius * 0.55;
+        let speaker = pos2(
+            planar.x,
+            (planar.y - height_px)
+                .clamp(canvas.top() + 16.0, canvas.bottom() - 28.0),
+        );
+
+        // Horizontal projection and height stick.
+        ui.painter().line_segment(
+            [center, planar],
+            Stroke::new(1.2_f32, theme::with_alpha(theme.accent_b, 130)),
+        );
+        if height_px.abs() > 1.0 {
+            ui.painter().line_segment(
+                [planar, speaker],
+                Stroke::new(1.6_f32, theme::with_alpha(theme.accent_a, 180)),
+            );
+        }
+        ui.painter().circle_filled(
+            planar,
+            3.2,
+            theme::with_alpha(theme.accent_a, 110),
+        );
+        ui.painter().circle_stroke(
+            planar,
+            6.0,
+            Stroke::new(1.0_f32, theme::with_alpha(theme.accent_a, 90)),
         );
 
         // Listener.
@@ -3276,7 +3571,19 @@ impl PlayerApp {
             theme.bg(),
         );
 
-        // Speaker.
+        // Source. A pulsing halo marks an active test pattern.
+        if test_mode.active() {
+            let time = ui.input(|input| input.time);
+            let pulse = (time * 3.0).sin() as f32 * 0.5 + 0.5;
+            ui.painter().circle_stroke(
+                speaker,
+                16.0 + pulse * 5.0,
+                Stroke::new(
+                    1.0_f32,
+                    theme::with_alpha(theme.accent_b, (70.0 - pulse * 35.0) as u8),
+                ),
+            );
+        }
         ui.painter()
             .circle_filled(speaker, 12.0, theme::with_alpha(theme.accent_a, 200));
         ui.painter().circle_stroke(
@@ -3286,22 +3593,19 @@ impl PlayerApp {
         );
         ui::paint_glyph(ui.painter(), speaker, 14.0, Glyph::Volume, theme.text());
 
-        let distance = (x * x + y * y).sqrt();
-        let meters = distance * self.config.ui.room_size;
-        let pan_text = if x.abs() < 0.05 {
-            "CENTER".to_string()
-        } else {
-            format!(
-                "{} {:.0}%",
-                if x < 0.0 { "LEFT" } else { "RIGHT" },
-                x.abs() * 100.0
-            )
-        };
+        let label = format!(
+            "{}AZ {:+.0}° · EL {:+.0}° · {:.2} m · H {:+.2} m",
+            if test_mode.active() { "TEST · " } else { "" },
+            scene.azimuth_deg,
+            scene.elevation_deg,
+            scene.distance,
+            position[1],
+        );
         ui.painter().text(
-            pos2(canvas.left() + 10.0, canvas.bottom() - 10.0),
+            pos2(canvas.left() + 10.0, canvas.bottom() - 8.0),
             Align2::LEFT_BOTTOM,
-            format!("{meters:.1} m · {pan_text}"),
-            FontId::proportional(9.5),
+            label,
+            FontId::proportional(9.0),
             theme.faint(),
         );
 
@@ -3310,10 +3614,15 @@ impl PlayerApp {
             Id::unique("spatial-room"),
             Sense::click_and_drag(),
         );
+        if (response.drag_started() || response.clicked()) && test_mode.active() {
+            if let Some(audio) = &mut self.audio {
+                audio.set_test_mode(TestMode::Off);
+            }
+        }
         if response.dragged() || response.clicked() {
             if let Some(pointer) = response.interact_pointer_pos() {
                 let dx = (pointer.x - center.x) / radius;
-                let dy = (pointer.y - center.y) / radius;
+                let dy = (center.y - pointer.y) / radius;
                 let length = (dx * dx + dy * dy).sqrt();
                 let (nx, ny) = if length > 1.0 {
                     (dx / length, dy / length)
@@ -3329,42 +3638,117 @@ impl PlayerApp {
             self.save_config();
         }
 
-        // Room size and reverb.
-        let controls = if horizontal {
-            Rect::from_min_max(
-                pos2(canvas.right() + 14.0, area.top()),
-                pos2(area.right(), area.bottom()),
-            )
-        } else {
-            Rect::from_min_max(
-                pos2(area.left(), canvas.bottom() + 6.0),
-                pos2(area.right(), area.bottom()),
-            )
-        };
-        let row_height = if horizontal {
-            26.0
-        } else {
-            (controls.height() / 2.0).min(26.0)
-        };
-        let block_height = row_height * 2.0 + 2.0;
         let block_top = if horizontal {
-            (controls.top() + (controls.height() - block_height) * 0.5).max(controls.top())
+            (controls.top() + (controls.height() - controls_height) * 0.5)
+                .max(controls.top())
         } else {
             controls.top()
         };
-        let room_row = Rect::from_min_size(
-            pos2(controls.left(), block_top),
-            vec2(controls.width(), row_height),
+        let row_rect = |index: usize| {
+            Rect::from_min_size(
+                pos2(
+                    controls.left(),
+                    block_top + index as f32 * (row_height + row_gap),
+                ),
+                vec2(controls.width(), row_height),
+            )
+        };
+
+        let height_fraction = ((self.config.ui.spatial_height + 2.5) / 5.0).clamp(0.0, 1.0);
+        let (height_response, requested) = Self::slider_row(
+            ui,
+            row_rect(0),
+            "spatial-height",
+            "HEIGHT",
+            &format!("{:+.2} m", self.config.ui.spatial_height),
+            height_fraction,
+            &theme,
         );
-        let reverb_row = Rect::from_min_size(
-            pos2(controls.left(), block_top + row_height + 2.0),
-            vec2(controls.width(), row_height),
+        if let Some(fraction) = requested {
+            self.config.ui.spatial_height = -2.5 + fraction * 5.0;
+            self.apply_spatial();
+        }
+        if height_response.drag_stopped() || height_response.clicked() {
+            self.save_config();
+        }
+
+        let head_fraction = ((self.config.ui.head_yaw + 180.0) / 360.0).clamp(0.0, 1.0);
+        let (head_response, requested) = Self::slider_row(
+            ui,
+            row_rect(1),
+            "spatial-head",
+            "HEAD",
+            &format!("{:+.0}°", self.config.ui.head_yaw),
+            head_fraction,
+            &theme,
         );
+        if let Some(fraction) = requested {
+            self.config.ui.head_yaw = -180.0 + fraction * 360.0;
+            self.apply_spatial();
+        }
+        if head_response.drag_stopped() || head_response.clicked() {
+            self.save_config();
+        }
+
+        let manual_position = spatial::position_from_pad(
+            self.config.ui.spatial_x,
+            self.config.ui.spatial_y,
+            self.config.ui.spatial_height,
+            self.config.ui.room_size,
+        );
+        let horizontal = (manual_position[0] * manual_position[0]
+            + manual_position[2] * manual_position[2])
+            .sqrt();
+        let height_abs = manual_position[1].abs();
+        let max_horizontal = (self.config.ui.room_size * 0.5)
+            .max(spatial::MIN_DISTANCE + 0.1);
+        let min_distance = (spatial::MIN_DISTANCE * spatial::MIN_DISTANCE
+            + height_abs * height_abs)
+            .sqrt();
+        let max_distance = (max_horizontal * max_horizontal + height_abs * height_abs)
+            .sqrt()
+            .max(min_distance + 0.001);
+        let current_distance =
+            (horizontal * horizontal + height_abs * height_abs).sqrt();
+        let distance_fraction = ((current_distance - min_distance)
+            / (max_distance - min_distance))
+            .clamp(0.0, 1.0);
+        let (distance_response, requested) = Self::slider_row(
+            ui,
+            row_rect(2),
+            "spatial-distance",
+            "DIST",
+            &format!("{current_distance:.2} m"),
+            distance_fraction,
+            &theme,
+        );
+        if let Some(fraction) = requested {
+            let target = min_distance + fraction * (max_distance - min_distance);
+            let target_horizontal = (target * target - height_abs * height_abs)
+                .max(0.0)
+                .sqrt()
+                .clamp(spatial::MIN_DISTANCE, max_horizontal);
+            let radius = (target_horizontal / max_horizontal).clamp(0.0, 1.0);
+            let length = (self.config.ui.spatial_x * self.config.ui.spatial_x
+                + self.config.ui.spatial_y * self.config.ui.spatial_y)
+                .sqrt();
+            if length > 1e-3 {
+                self.config.ui.spatial_x *= radius / length;
+                self.config.ui.spatial_y *= radius / length;
+            } else {
+                self.config.ui.spatial_x = 0.0;
+                self.config.ui.spatial_y = radius;
+            }
+            self.apply_spatial();
+        }
+        if distance_response.drag_stopped() || distance_response.clicked() {
+            self.save_config();
+        }
 
         let room_fraction = ((self.config.ui.room_size - 2.0) / 22.0).clamp(0.0, 1.0);
         let (room_response, requested) = Self::slider_row(
             ui,
-            room_row,
+            row_rect(3),
             "spatial-room-size",
             "ROOM",
             &format!("{:.1} m", self.config.ui.room_size),
@@ -3381,7 +3765,7 @@ impl PlayerApp {
 
         let (reverb_response, requested) = Self::slider_row(
             ui,
-            reverb_row,
+            row_rect(4),
             "spatial-reverb",
             "REVERB",
             &format!("{:.0}%", self.config.ui.reverb * 100.0),
@@ -3394,6 +3778,10 @@ impl PlayerApp {
         }
         if reverb_response.drag_stopped() || reverb_response.clicked() {
             self.save_config();
+        }
+
+        if test_mode.active() {
+            ui.ctx().request_repaint();
         }
     }
 
@@ -5154,21 +5542,37 @@ impl PlayerApp {
             }
         });
         ui.add_space(8.0);
-        let tools = download::tools_dir();
+        let tools_dir = download::tools_dir();
+        let tools_ready = deps::tools_ready();
+        let hrtf_ready = deps::hrtf_ready();
         ui.label(
-            egui::RichText::new(match tools {
-                Some(ref path) => format!("Tools found in {}", path.display()),
-                None => "Tools not found. BR1 Player can download yt-dlp, spotdl and FFmpeg for you.".to_string(),
+            egui::RichText::new(match tools_dir {
+                Some(ref path) if tools_ready => {
+                    format!("Tools found in {}", path.display())
+                }
+                _ => "The downloader tools are not fully installed.".to_string(),
             })
             .size(10.5)
-            .color(if tools.is_some() { theme.muted() } else { theme.danger() }),
+            .color(if tools_ready {
+                theme.muted()
+            } else {
+                theme.danger()
+            }),
         );
-        if tools.is_none() {
+        if !hrtf_ready {
+            ui.add_space(3.0);
+            ui.label(
+                egui::RichText::new("Measured KEMAR HRTF sets are not installed.")
+                    .size(10.5)
+                    .color(theme.muted()),
+            );
+        }
+        if !deps::assets_ready() {
             ui.add_space(6.0);
             if ui::pill_button_sized(
                 ui,
-                150.0,
-                "Download tools",
+                190.0,
+                "Download missing files",
                 true,
                 theme,
                 GlassSlot::SettingsControl,

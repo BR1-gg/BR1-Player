@@ -1,9 +1,17 @@
 # Rust build output
 /target/
 
-# Bundled downloader tools (yt-dlp, spotdl, ffmpeg + DLLs — 250 MB, over GitHub's
-# file size limit). Install them into ./bin as described in the README.
+# Runtime downloads: yt-dlp, spotdl, FFmpeg and their DLLs.
+# The app installs these into ./bin on first launch; they are not part of the repo.
 /bin/
 
-# Note: the built "BR1 Player.exe" files are intentionally tracked so the app can
-# be run without compiling. Do not add a blanket *.exe rule here.
+# Logs, temporary downloads and OS junk
+*.log
+*.tmp
+*.download
+Thumbs.db
+.DS_Store
+
+# Note: the portable "BR1 Player.exe" in the project root is intentionally
+# tracked. A release build is also attached to GitHub Releases by the workflow.
+# Do not add a blanket *.exe rule here.

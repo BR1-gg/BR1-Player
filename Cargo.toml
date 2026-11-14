@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.99"
 description = "BR1 Player - desktop music player with playlist downloads"
+license = "MIT"
 
 [dependencies]
 egui = { version = "0.37.0", features = ["default_fonts"] }
@@ -14,6 +15,7 @@ winit = "0.30"
 pollster = "1.0"
 liquid-rust = "0.2.5"
 rodio = "0.22.2"
+sofar = "0.4.0"
 lofty = "0.22.4"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "bmp", "webp"] }
 rfd = "0.15.4"

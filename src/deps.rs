@@ -1,10 +1,16 @@
-//! One-time installation of the external tools the downloader needs.
+//! One-time installation of the external assets the app needs.
 //!
-//! The player itself is a single executable; `yt-dlp.exe`, `spotdl.exe` and
-//! `ffmpeg.exe` are fetched into a `bin` folder next to the executable (or into
-//! `%LOCALAPPDATA%\BR1 Player\bin` when that folder is read-only) the first
-//! time it starts, while the UI shows a loading screen. [`start`] does all the
-//! work on a worker thread and reports progress through a channel.
+//! The player itself is a single executable. On the very first launch — tracked
+//! by a marker in `%APPDATA%\DefPlayer` — it downloads:
+//!
+//! * `yt-dlp.exe`, `spotdl.exe`, `ffmpeg.exe` and `ffprobe.exe`, into a `bin`
+//!   folder next to the executable (or `%LOCALAPPDATA%\BR1 Player\bin` when
+//!   that folder is read-only), and
+//! * two measured MIT KEMAR SOFA HRTF sets into `%APPDATA%\DefPlayer\hrtf`.
+//!
+//! The loading screen shows the progress, and nothing is downloaded again on
+//! later starts. Settings → Downloads has a button that can re-run the same
+//! installer if a user later removes a file.
 
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -20,6 +26,32 @@ const TOOLS: [(&str, &str, f32); 3] = [
     ("ffmpeg.exe", "FFmpeg", 115.0),
 ];
 
+/// Row used by the HRTF downloads in the loading screen.
+const HRTF_ROW: usize = TOOLS.len();
+/// Loading-screen rows: three tools plus one combined HRTF row.
+const ROWS: usize = TOOLS.len() + 1;
+
+const KEMAR_NORMAL_URL: &str =
+    "https://sofacoustics.org/data/database/mit/mit_kemar_normal_pinna.sofa";
+const KEMAR_LARGE_URL: &str =
+    "https://sofacoustics.org/data/database/mit/mit_kemar_large_pinna.sofa";
+
+/// Target file name, loading-screen label, weight in MB and source URL.
+const HRTF_ASSETS: [(&str, &str, f32, &str); 2] = [
+    (
+        "MIT_KEMAR_normal.sofa",
+        "MIT KEMAR normal pinna",
+        1.2,
+        KEMAR_NORMAL_URL,
+    ),
+    (
+        "MIT_KEMAR_large.sofa",
+        "MIT KEMAR large pinna",
+        1.2,
+        KEMAR_LARGE_URL,
+    ),
+];
+
 const YT_DLP_URL: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
 const SPOTDL_RELEASE_API: &str =
     "https://api.github.com/repos/spotDL/spotify-downloader/releases/latest";
@@ -30,8 +62,9 @@ const FFMPEG_URL: &str = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-esse
 
 /// Progress report from the installer thread.
 pub enum Event {
-    /// `tool` is an index into [`TOOLS`]; `fraction` is the overall progress
-    /// (`None` while the size is unknown, e.g. while unpacking the zip).
+    /// `tool` is a loading-screen row: 0..3 are the tools, 3 is the combined
+    /// HRTF row. `fraction` is the overall progress (`None` while the size is
+    /// unknown, e.g. while unpacking the zip).
     Progress {
         tool: usize,
         status: String,
@@ -40,8 +73,8 @@ pub enum Event {
     Finished(Result<(), String>),
 }
 
-/// Tools that are missing from the folder the player loads them from.
-pub fn missing() -> Vec<usize> {
+/// Tool indices that are missing from the folder the player loads them from.
+pub fn missing_tools() -> Vec<usize> {
     match crate::download::tools_dir() {
         Some(dir) => TOOLS
             .iter()
@@ -54,21 +87,87 @@ pub fn missing() -> Vec<usize> {
 }
 
 /// True when every download tool is already in place.
-pub fn ready() -> bool {
-    missing().is_empty()
+pub fn tools_ready() -> bool {
+    missing_tools().is_empty()
 }
 
-/// Label of a tool, for status lines and the loading screen.
+/// HRTF files that are missing (or not valid SOFA/HDF5 files).
+fn missing_hrtf() -> Vec<usize> {
+    let dir = crate::spatial::hrtf_folder();
+    HRTF_ASSETS
+        .iter()
+        .enumerate()
+        .filter(|(_, (file, _, _, _))| !is_sofa_file(&dir.join(file)))
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// Quick sanity check so an HTML error page is never treated as HRTF data.
+fn is_sofa_file(path: &Path) -> bool {
+    let Ok(mut file) = File::open(path) else {
+        return false;
+    };
+    let mut header = [0u8; 8];
+    if file.read_exact(&mut header).is_err() {
+        return false;
+    }
+    header == *b"\x89HDF\r\n\x1a\n" || header.starts_with(b"CDF")
+}
+
+/// True when both measured KEMAR sets are present.
+pub fn hrtf_ready() -> bool {
+    missing_hrtf().is_empty()
+}
+
+/// True when every tool and both HRTF sets are present.
+pub fn assets_ready() -> bool {
+    tools_ready() && hrtf_ready()
+}
+
+/// Marker written after the first-run installer completes (or is skipped).
+fn marker_path() -> Option<PathBuf> {
+    crate::config::config_path().map(|path| path.with_file_name("first_run_complete.txt"))
+}
+
+/// True until the first-run installer has completed once on this machine.
+pub fn needs_first_run() -> bool {
+    marker_path().map(|path| !path.is_file()).unwrap_or(true)
+}
+
+/// Record that the first-run installer has finished, so it is not run
+/// automatically again. The user can still re-run it from Settings.
+pub fn mark_first_run_complete() -> Result<(), String> {
+    let path = marker_path().ok_or_else(|| "Cannot find the APPDATA folder.".to_string())?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("Cannot create {}: {err}", parent.display()))?;
+    }
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_secs())
+        .unwrap_or(0);
+    fs::write(
+        &path,
+        format!(
+            "BR1 Player first-run setup\nversion {}\ncompleted {timestamp}\n",
+            env!("CARGO_PKG_VERSION")
+        ),
+    )
+    .map_err(|err| format!("Cannot write {}: {err}", path.display()))
+}
+
+/// Label of a loading-screen row.
 pub fn label(index: usize) -> &'static str {
-    TOOLS
-        .get(index)
-        .map(|(_, label, _)| *label)
-        .unwrap_or("tool")
+    if index < TOOLS.len() {
+        TOOLS[index].1
+    } else {
+        "HRTF sets"
+    }
 }
 
-/// Number of tools the loading screen lists.
+/// Number of rows the loading screen lists.
 pub fn count() -> usize {
-    TOOLS.len()
+    ROWS
 }
 
 /// Folder the tools are installed into.
@@ -111,18 +210,27 @@ pub fn start() -> Receiver<Event> {
 fn run(sender: &Sender<Event>) -> Result<(), String> {
     let dir = target_dir();
     fs::create_dir_all(&dir).map_err(|err| format!("Cannot create {}: {err}", dir.display()))?;
+    let hrtf_dir = crate::spatial::hrtf_folder();
+    fs::create_dir_all(&hrtf_dir)
+        .map_err(|err| format!("Cannot create {}: {err}", hrtf_dir.display()))?;
 
-    let pending = missing();
-    let total: f32 = pending
+    let pending_tools = missing_tools();
+    let pending_hrtf = missing_hrtf();
+    let hrtf_weight: f32 = pending_hrtf
+        .iter()
+        .map(|index| HRTF_ASSETS[*index].2)
+        .sum();
+    let total: f32 = pending_tools
         .iter()
         .map(|index| TOOLS[*index].2)
         .sum::<f32>()
-        .max(1.0);
+        + hrtf_weight;
+    let total = total.max(1.0);
 
     let agent = agent();
-
     let mut done_weight = 0.0f32;
-    for index in pending {
+
+    for index in pending_tools {
         let span = TOOLS[index].2 / total;
         let (file, label, _) = TOOLS[index];
 
@@ -130,7 +238,7 @@ fn run(sender: &Sender<Event>) -> Result<(), String> {
             "ffmpeg.exe" => install_ffmpeg(&agent, &dir, sender, index, done_weight, span)?,
             "spotdl.exe" => {
                 let url = spotdl_url(&agent).unwrap_or_else(|| SPOTDL_FALLBACK_URL.to_string());
-                download_tool(
+                download_file(
                     &agent,
                     &url,
                     &dir,
@@ -143,7 +251,7 @@ fn run(sender: &Sender<Event>) -> Result<(), String> {
                 )?;
             }
             _ => {
-                download_tool(
+                download_file(
                     &agent,
                     YT_DLP_URL,
                     &dir,
@@ -160,12 +268,64 @@ fn run(sender: &Sender<Event>) -> Result<(), String> {
         done_weight += span;
     }
 
+    if !pending_hrtf.is_empty() {
+        let row_span = hrtf_weight / total;
+        let mut sub_done = 0.0f32;
+        for index in pending_hrtf {
+            let (file, label, weight, url) = HRTF_ASSETS[index];
+            let span = weight / total;
+            download_file(
+                &agent,
+                url,
+                &hrtf_dir,
+                file,
+                label,
+                sender,
+                HRTF_ROW,
+                done_weight + sub_done,
+                span,
+            )?;
+            let path = hrtf_dir.join(file);
+            if !is_sofa_file(&path) {
+                let _ = fs::remove_file(&path);
+                return Err(format!(
+                    "The {label} download is not a valid SOFA file."
+                ));
+            }
+            sub_done += span;
+        }
+        write_hrtf_notice(&hrtf_dir);
+        let _ = sender.send(Event::Progress {
+            tool: HRTF_ROW,
+            status: "HRTF sets installed".to_string(),
+            fraction: Some(done_weight + row_span),
+        });
+    }
+
     let _ = sender.send(Event::Progress {
-        tool: TOOLS.len(),
+        tool: ROWS,
         status: "All set — starting BR1 Player…".to_string(),
         fraction: Some(1.0),
     });
     Ok(())
+}
+
+/// Attribution next to the downloaded measured HRTFs.
+fn write_hrtf_notice(dir: &Path) {
+    let text = "\
+MIT KEMAR HRTF data
+===================
+
+Downloaded from the SOFA database:
+  https://sofacoustics.org/data/database/mit/
+
+Please cite:
+  W. G. Gardner and K. D. Martin, \"HRTF measurements of a KEMAR\",
+  Journal of the Acoustical Society of America 97(6), 3907-3908 (1995).
+
+The files are used locally by BR1 Player for binaural headphone rendering.
+";
+    let _ = fs::write(dir.join("ATTRIBUTION.txt"), text);
 }
 
 /// HTTP client used for every download. Native TLS keeps the build free of a
@@ -183,9 +343,9 @@ fn agent() -> ureq::Agent {
     )
 }
 
-/// Downloads an executable straight into `dir`.
+/// Downloads a file straight into `dir` (an executable or a SOFA file).
 #[allow(clippy::too_many_arguments)]
-fn download_tool(
+fn download_file(
     agent: &ureq::Agent,
     url: &str,
     dir: &Path,
@@ -497,6 +657,48 @@ mod tests {
     }
 
     #[test]
+    fn loading_screen_rows() {
+        assert_eq!(count(), 4);
+        assert_eq!(label(0), "yt-dlp");
+        assert_eq!(label(1), "spotdl");
+        assert_eq!(label(2), "FFmpeg");
+        assert_eq!(label(3), "HRTF sets");
+    }
+
+    #[test]
+    #[ignore = "downloads ~2.3 MB from sofacoustics.org"]
+    fn downloads_the_kemar_sets() {
+        let dir = std::env::temp_dir().join("br1-kemar-download-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let (sender, _receiver) = channel();
+        let agent = agent();
+        for (index, (file, label, _, url)) in HRTF_ASSETS.iter().enumerate() {
+            download_file(
+                &agent,
+                url,
+                &dir,
+                file,
+                label,
+                &sender,
+                HRTF_ROW,
+                0.0,
+                (index + 1) as f32 * 0.5,
+            )
+            .unwrap();
+            let path = dir.join(file);
+            assert!(path.is_file(), "{file} was not installed");
+            assert!(
+                fs::metadata(&path).unwrap().len() > 1_000_000,
+                "{file} looks truncated"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     #[ignore = "downloads ~190 MB from the internet"]
     fn installs_the_real_tools() {
         let dir = std::env::temp_dir().join("br1-deps-install-test");
@@ -512,7 +714,7 @@ mod tests {
             "unexpected spotdl url: {url}"
         );
 
-        download_tool(
+        download_file(
             &agent,
             YT_DLP_URL,
             &dir,
@@ -524,7 +726,7 @@ mod tests {
             0.2,
         )
         .unwrap();
-        download_tool(
+        download_file(
             &agent,
             &url,
             &dir,

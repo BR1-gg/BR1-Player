@@ -8,6 +8,7 @@ mod download;
 mod glass;
 mod library;
 mod queue;
+mod spatial;
 mod theme;
 mod ui;
 mod visualizer;
