@@ -165,9 +165,9 @@ pub fn available_hrtf_sets() -> Vec<HrtfSetInfo> {
             name: kind.name().to_string(),
             short: kind.short().to_string(),
             detail: match kind {
-                SyntheticKind::Studio => "Generic adult head Â· synthetic HRTF".into(),
-                SyntheticKind::Compact => "Smaller head Â· tighter ITD".into(),
-                SyntheticKind::Broad => "Larger head Â· wider ITD".into(),
+                SyntheticKind::Studio => "Generic adult head · synthetic HRTF".into(),
+                SyntheticKind::Compact => "Smaller head · tighter ITD".into(),
+                SyntheticKind::Broad => "Larger head · wider ITD".into(),
             },
             kind: HrtfSetKind::Synthetic(kind),
         });
@@ -895,6 +895,7 @@ pub struct SpatialShared {
     pitch: AtomicU32,
     roll: AtomicU32,
     hrtf_enabled: AtomicBool,
+    enabled: AtomicBool,
     test_mode: AtomicU32,
     sample_rate: AtomicU32,
     providers: Mutex<ProviderState>,
@@ -914,6 +915,7 @@ impl SpatialShared {
             pitch: AtomicU32::new(0.0f32.to_bits()),
             roll: AtomicU32::new(0.0f32.to_bits()),
             hrtf_enabled: AtomicBool::new(true),
+            enabled: AtomicBool::new(true),
             test_mode: AtomicU32::new(0),
             sample_rate: AtomicU32::new(48_000),
             providers: Mutex::new(ProviderState {
@@ -985,6 +987,17 @@ impl SpatialShared {
 
     pub fn set_hrtf_enabled(&self, enabled: bool) {
         self.hrtf_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    /// True while the spatial chain is applied. When it is off the source
+    /// passes the untouched stereo signal through (no pan, HRTF or reverb),
+    /// which is what the UI uses while the component is hidden or switched off.
+    pub fn enabled(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed)
+    }
+
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Relaxed);
     }
 
     pub fn test_mode(&self) -> TestMode {
@@ -1419,6 +1432,9 @@ pub struct SpatialSource<S> {
     sample_rate: u32,
     input_frame: [f32; 8],
     mono: Vec<f32>,
+    dry_l: Vec<f32>,
+    dry_r: Vec<f32>,
+    dry_mix: f32,
     left: Vec<f32>,
     right: Vec<f32>,
     output: Vec<f32>,
@@ -1476,6 +1492,9 @@ where
             sample_rate,
             input_frame: [0.0; 8],
             mono: vec![0.0; PARTITION_LEN],
+            dry_l: vec![0.0; PARTITION_LEN],
+            dry_r: vec![0.0; PARTITION_LEN],
+            dry_mix: if shared.enabled() { 0.0 } else { 1.0 },
             left: vec![0.0; PARTITION_LEN],
             right: vec![0.0; PARTITION_LEN],
             output: vec![0.0; PARTITION_LEN * 2],
@@ -1521,15 +1540,37 @@ where
                 sum += self.input_frame[channel];
             }
             self.mono[index] = (sum / used.max(1) as f32).clamp(-1.0, 1.0);
+            // Untouched stereo, used while spatial rendering is switched off.
+            let dry_left = self.input_frame[0];
+            let dry_right = if used > 1 {
+                self.input_frame[1]
+            } else {
+                dry_left
+            };
+            self.dry_l[index] = dry_left.clamp(-1.0, 1.0);
+            self.dry_r[index] = dry_right.clamp(-1.0, 1.0);
             valid += 1;
         }
         if valid < PARTITION_LEN {
             self.mono[valid..].fill(0.0);
+            self.dry_l[valid..].fill(0.0);
+            self.dry_r[valid..].fill(0.0);
         }
         valid
     }
 
     fn process_block(&mut self) {
+        let enabled = self.shared.enabled();
+        if !enabled && self.dry_mix >= 0.999 {
+            // Fully bypassed: hand the untouched stereo through and skip every
+            // filter, so a hidden or switched-off component really is inert.
+            for index in 0..PARTITION_LEN {
+                self.output[index * 2] = self.dry_l[index];
+                self.output[index * 2 + 1] = self.dry_r[index];
+            }
+            return;
+        }
+
         let position = self.shared.position();
         let scene = scene(
             position,
@@ -1644,18 +1685,28 @@ where
 
         let step = 1.0 / PARTITION_LEN as f32;
         let mut fade = self.fade;
+        let dry_target = if enabled { 0.0 } else { 1.0 };
+        let mut dry_mix = self.dry_mix;
         for index in 0..PARTITION_LEN {
             if fade < target_fade {
                 fade = (fade + step).min(target_fade);
             } else if fade > target_fade {
                 fade = (fade - step).max(target_fade);
             }
-            let left = (self.left[index] * fade).clamp(-1.0, 1.0);
-            let right = (self.right[index] * fade).clamp(-1.0, 1.0);
+            if dry_mix < dry_target {
+                dry_mix = (dry_mix + step).min(dry_target);
+            } else if dry_mix > dry_target {
+                dry_mix = (dry_mix - step).max(dry_target);
+            }
+            let dry = dry_mix;
+            let left = (self.left[index] * (1.0 - dry) + self.dry_l[index] * dry).clamp(-1.0, 1.0);
+            let right =
+                (self.right[index] * (1.0 - dry) + self.dry_r[index] * dry).clamp(-1.0, 1.0);
             self.output[index * 2] = left;
             self.output[index * 2 + 1] = right;
         }
         self.fade = fade;
+        self.dry_mix = dry_mix;
 
         if switching && fade <= 0.0001 {
             self.active_path = desired_path;
@@ -2092,6 +2143,8 @@ mod tests {
         assert_eq!(shared.head_yaw(), 45.0);
         shared.set_hrtf_enabled(false);
         assert!(!shared.hrtf_enabled());
+        shared.set_enabled(false);
+        assert!(!shared.enabled());
         shared.set_test_mode(TestMode::Above);
         assert_eq!(shared.test_mode(), TestMode::Above);
     }
@@ -2137,6 +2190,73 @@ mod tests {
             max_delta < 0.5,
             "moving/HRTF switching should not produce a click (max delta {max_delta})"
         );
+    }
+
+    #[test]
+    fn disabled_spatial_source_passes_the_stereo_signal_through() {
+        use rodio::buffer::SamplesBuffer;
+
+        let shared = Arc::new(SpatialShared::new());
+        shared.set_reverb(0.6);
+        shared.set_position([1.5, 0.5, 0.0]);
+        shared.set_enabled(false);
+
+        let mut interleaved = Vec::new();
+        for index in 0..PARTITION_LEN * 2 {
+            let phase = index as f32 * 0.05;
+            interleaved.push(phase.sin() * 0.4);
+            interleaved.push((phase + 1.0).cos() * 0.3);
+        }
+
+        let source = SamplesBuffer::new(
+            NonZero::new(2).unwrap(),
+            NonZero::new(48_000).unwrap(),
+            interleaved.clone(),
+        );
+        let mut spatial = SpatialSource::new(source, shared.clone());
+
+        let mut output = Vec::new();
+        while let Some(sample) = spatial.next() {
+            output.push(sample);
+        }
+
+        // The first block crossfades from the spatial render to the dry signal;
+        // afterwards the output has to match the input sample for sample.
+        let settle = PARTITION_LEN * 2;
+        assert!(output.len() > settle);
+        for (index, expected) in interleaved[settle..].iter().enumerate() {
+            let got = output[settle + index];
+            assert!(
+                (got - expected).abs() < 1e-5,
+                "sample {index}: {got} != {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn disabling_spatial_does_not_click() {
+        use rodio::source::SineWave;
+
+        let shared = Arc::new(SpatialShared::new());
+        let provider: Arc<dyn HrtfProvider> =
+            Arc::new(SyntheticProvider::new(SyntheticKind::Studio, 48_000.0));
+        shared.install_set("test", vec![(48_000, provider)]);
+        shared.set_position([1.2, 0.0, 0.8]);
+
+        let mut source = SpatialSource::new(SineWave::new(220.0), shared.clone());
+        let mut previous = 0.0f32;
+        let mut max_delta = 0.0f32;
+        for index in 0..(PARTITION_LEN * 8) {
+            if index == PARTITION_LEN * 3 {
+                shared.set_enabled(false);
+            }
+            let sample = source.next().expect("infinite source");
+            if index > 0 {
+                max_delta = max_delta.max((sample - previous).abs());
+            }
+            previous = sample;
+        }
+        assert!(max_delta < 0.5, "bypass should not click (max delta {max_delta})");
     }
 
     #[test]

@@ -28,6 +28,8 @@ pub struct Track {
     pub folder: Option<PathBuf>,
     /// Playlist name = path relative to the music root, `None` for loose files.
     pub playlist: Option<String>,
+    /// File modification time (unix seconds), used by the newest/oldest sorts.
+    pub added: u64,
 }
 
 pub fn is_audio(path: &Path) -> bool {
@@ -88,6 +90,13 @@ fn playlist_name(path: &Path, root: &Path) -> Option<String> {
 }
 
 fn read_track(path: &Path) -> Track {
+    let added = std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+
     let mut track = Track {
         path: path.to_path_buf(),
         title: path
@@ -102,6 +111,7 @@ fn read_track(path: &Path) -> Track {
         art: None,
         folder: path.parent().map(|parent| parent.to_path_buf()),
         playlist: None,
+        added,
     };
 
     let Ok(tagged) = lofty::read_from_path(path) else {

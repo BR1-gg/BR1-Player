@@ -351,7 +351,8 @@ impl AudioEngine {
         self.spatial.set_reverb(ui.reverb);
         self.spatial.set_head_yaw(ui.head_yaw);
         self.spatial.set_hrtf_enabled(ui.hrtf_enabled);
-        self.set_eq(&ui.eq_gains, ui.eq_enabled);
+        self.spatial.set_enabled(ui.spatial_active());
+        self.set_eq(&ui.eq_gains, ui.eq_active());
 
         let mut warning = None;
         if let Err(error) = self.set_hrtf_set(&ui.hrtf_set) {
@@ -482,6 +483,12 @@ impl AudioEngine {
 
     pub fn set_hrtf_enabled(&self, enabled: bool) {
         self.spatial.set_hrtf_enabled(enabled);
+    }
+
+    /// Turns the whole spatial chain on or off. While off the decoder's stereo
+    /// signal is passed through untouched (no pan, HRTF or room reverb).
+    pub fn set_spatial_enabled(&self, enabled: bool) {
+        self.spatial.set_enabled(enabled);
     }
 
     pub fn test_mode(&self) -> TestMode {

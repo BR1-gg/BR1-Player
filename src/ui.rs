@@ -16,6 +16,7 @@ pub enum Glyph {
     Plus,
     Close,
     Sliders,
+    Gear,
     Volume,
     Mute,
     Note,
@@ -161,7 +162,7 @@ pub fn paint_glyph(
             );
         }
         Glyph::Sliders => {
-            for (index, offset) in [(-0.62f32, -0.28f32), (0.0, 0.30), (0.62, -0.05)] {
+            for (index, offset) in [(-0.62f32, -0.5f32), (0.0, 0.0), (0.62, 0.5)] {
                 let y = center.y + s * offset;
                 painter.line_segment(
                     [pos2(center.x - s * 0.92, y), pos2(center.x + s * 0.92, y)],
@@ -169,6 +170,20 @@ pub fn paint_glyph(
                 );
                 painter.circle_filled(pos2(center.x + s * index, y), s * 0.22, color);
             }
+        }
+        Glyph::Gear => {
+            // Classic settings cog: a thick rim ring with a hollow hub and
+            // eight stubby teeth grown out of it.
+            let teeth = 8usize;
+            for index in 0..teeth {
+                let angle = index as f32 * std::f32::consts::TAU / teeth as f32;
+                let dir = vec2(angle.cos(), angle.sin());
+                painter.line_segment(
+                    [center + dir * s * 0.70, center + dir * s * 1.04],
+                    Stroke::new(s * 0.32, color),
+                );
+            }
+            painter.circle_stroke(center, s * 0.60, Stroke::new(s * 0.26, color));
         }
         Glyph::Volume | Glyph::Mute => {
             painter.add(Shape::convex_polygon(

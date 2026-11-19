@@ -5,11 +5,11 @@ use std::time::{Duration, Instant};
 
 use egui::{
     pos2, vec2, Align, Align2, Color32, CornerRadius, CursorIcon, FontId, Id, Layout, Rect, Sense,
-    Stroke, StrokeKind, TextureHandle, TextureOptions, Ui, UiBuilder,
+    Stroke, StrokeKind, TextureHandle, TextureOptions, Ui, UiBuilder, Vec2,
 };
 
 use crate::audio::{AudioEngine, EQ_FREQS};
-use crate::config::{self, Config, GlassPreset, GlassShape, UiConfig, EQ_BANDS};
+use crate::config::{self, Config, GlassPreset, GlassShape, TrackSort, UiConfig, EQ_BANDS};
 use crate::deps;
 use crate::download;
 use crate::glass::GlassSlot;
@@ -153,6 +153,12 @@ pub struct PlayerApp {
     configured: bool,
     install: InstallState,
     initial_paths: Vec<PathBuf>,
+    /// True while the spatial renderer is applied (panel visible and switched on).
+    spatial_active: bool,
+    /// Whether the equalizer currently processes playback; mirrors
+    /// [`UiConfig::eq_active`] so adding or hiding the component takes
+    /// effect immediately.
+    eq_active: bool,
     tracks: Vec<Track>,
     visible: Vec<usize>,
     active_playlist: Option<String>,
@@ -203,6 +209,39 @@ pub struct PlayerApp {
     background_loaded: Option<PathBuf>,
     video: VideoBackground,
     drop_hovering: bool,
+    sort_menu_open: bool,
+    sort_menu_pos: egui::Pos2,
+    sort_menu_rect: Rect,
+    sort_menu_ignore_click: bool,
+    /// The component currently dragged in layout mode.
+    layout_drag: Option<LayoutDrag>,
+    /// The component gliding to its snapped position after a layout drag.
+    layout_anim: Option<LayoutAnim>,
+    /// Name being typed for a new layout preset.
+    layout_preset_name: String,
+    /// Snapshot of the UI config as last written to disk by the auto-save.
+    saved_ui: UiConfig,
+    /// When the config was last written to disk.
+    saved_at: Instant,
+}
+
+/// Live drag state for one dashboard component in layout mode.
+struct LayoutDrag {
+    index: usize,
+    /// Pointer offset inside the component at grab time.
+    grab: Vec2,
+    /// True when pulling the resize corner instead of the body.
+    resizing: bool,
+}
+
+/// Smooth glide from a drag drop to the snapped grid position.
+struct LayoutAnim {
+    index: usize,
+    from: Vec2,
+    to: Vec2,
+    /// True when animating size instead of position.
+    resizing: bool,
+    start: Instant,
 }
 
 impl PlayerApp {
@@ -214,7 +253,7 @@ impl PlayerApp {
         initial_url: Option<String>,
         real_glass: bool,
     ) -> Self {
-        let mut saved = config::load();
+        let (mut saved, load_note) = config::load_reported();
         let configured = saved.is_some();
         let mut config = saved
             .take()
@@ -230,6 +269,9 @@ impl PlayerApp {
             }
             Err(err) => (None, Some(err)),
         };
+        // A recovered-or-lost settings note outranks nothing: show it once
+        // at startup so a reset is never silent again.
+        let status = status.or(load_note);
 
         let manager = queue::Manager::new(queue::Settings {
             root: config.library_root.clone(),
@@ -238,6 +280,7 @@ impl PlayerApp {
         });
 
         let installing = deps::needs_first_run();
+        let saved_ui = config.ui.clone();
 
         let mut app = Self {
             view: if installing {
@@ -250,6 +293,8 @@ impl PlayerApp {
             configured,
             install: InstallState::default(),
             initial_paths,
+            spatial_active: config.ui.spatial_active(),
+            eq_active: config.ui.eq_active(),
             tracks: Vec::new(),
             visible: Vec::new(),
             active_playlist: None,
@@ -299,6 +344,15 @@ impl PlayerApp {
             background_loaded: None,
             video: VideoBackground::new(),
             drop_hovering: false,
+            sort_menu_open: false,
+            sort_menu_pos: egui::Pos2::ZERO,
+            sort_menu_rect: Rect::NOTHING,
+            sort_menu_ignore_click: false,
+            layout_drag: None,
+            layout_anim: None,
+            layout_preset_name: String::new(),
+            saved_ui,
+            saved_at: Instant::now(),
         };
 
         if installing {
@@ -348,6 +402,16 @@ impl PlayerApp {
         self.hero_tex = None;
         self.scroll_to_current = true;
 
+        // Count the play for the most-used sort.
+        let plays = self
+            .config
+            .ui
+            .track_plays
+            .entry(path.to_string_lossy().to_string())
+            .or_insert(0);
+        *plays += 1;
+        self.save_config();
+
         let Some(audio) = &mut self.audio else {
             self.notice("No audio output device available.", true);
             return;
@@ -355,7 +419,7 @@ impl PlayerApp {
 
         audio.set_volume(self.volume);
         audio.set_muted(self.muted);
-        audio.set_eq(&self.config.ui.eq_gains, self.config.ui.eq_enabled);
+        audio.set_eq(&self.config.ui.eq_gains, self.config.ui.eq_active());
 
         match audio.play(&path) {
             Ok(()) => {
@@ -535,6 +599,43 @@ impl PlayerApp {
             })
             .map(|(index, _)| index)
             .collect();
+
+        // The chosen song order also drives the next/previous buttons.
+        let sort = self.config.ui.track_sort;
+        let tracks = &self.tracks;
+        let plays = &self.config.ui.track_plays;
+        match sort {
+            TrackSort::Added => {}
+            TrackSort::Newest => self
+                .visible
+                .sort_by(|a, b| tracks[*b].added.cmp(&tracks[*a].added)),
+            TrackSort::Oldest => self
+                .visible
+                .sort_by(|a, b| tracks[*a].added.cmp(&tracks[*b].added)),
+            TrackSort::Title => self.visible.sort_by(|a, b| {
+                tracks[*a]
+                    .title
+                    .to_lowercase()
+                    .cmp(&tracks[*b].title.to_lowercase())
+            }),
+            TrackSort::MostUsed => self.visible.sort_by(|a, b| {
+                let a_plays = plays
+                    .get(tracks[*a].path.to_string_lossy().as_ref())
+                    .copied()
+                    .unwrap_or(0);
+                let b_plays = plays
+                    .get(tracks[*b].path.to_string_lossy().as_ref())
+                    .copied()
+                    .unwrap_or(0);
+                b_plays.cmp(&a_plays)
+            }),
+        }
+    }
+
+    /// Switches the active playlist.
+    fn activate_playlist(&mut self, playlist: Option<String>) {
+        self.active_playlist = playlist;
+        self.rebuild_visible();
     }
 
     fn playlist_texture(&self, name: &str) -> Option<&TextureHandle> {
@@ -737,6 +838,23 @@ impl PlayerApp {
         });
     }
 
+    /// Persists UI changes a couple of seconds after they happen, so state
+    /// survives even when the app is killed, crashes or the session ends
+    /// without a clean window close. Returns once the disk copy is current.
+    fn autosave(&mut self, ctx: &egui::Context) {
+        if self.config.ui == self.saved_ui {
+            return;
+        }
+        // Give rapid changes (slider drags, layout moves) time to settle.
+        if self.saved_at.elapsed() < Duration::from_secs(2) {
+            ctx.request_repaint_after(Duration::from_millis(500));
+            return;
+        }
+        self.save_config();
+        self.saved_ui = self.config.ui.clone();
+        self.saved_at = Instant::now();
+    }
+
     fn refresh_theme(&mut self, ctx: &egui::Context) {
         let real_glass = self.theme.real_glass;
         let foreground_only = self.theme.foreground_only;
@@ -745,7 +863,7 @@ impl PlayerApp {
         self.theme.foreground_only = foreground_only;
         configure_style(ctx, &self.theme);
         if let Some(audio) = &self.audio {
-            audio.set_eq(&self.config.ui.eq_gains, self.config.ui.eq_enabled);
+            audio.set_eq(&self.config.ui.eq_gains, self.config.ui.eq_active());
         }
     }
 
@@ -1398,7 +1516,9 @@ impl PlayerApp {
         let path = self.config.ui.background_video.clone();
         self.video.sync(path.as_ref(), ctx);
         self.video.update();
-
+        if let Some(error) = self.video.take_error() {
+            self.notice(error, true);
+        }
         if self.video.is_running() {
             ctx.request_repaint();
         }
@@ -1555,15 +1675,25 @@ impl PlayerApp {
             vec2(side, side),
         );
 
+        // The mini player lives on the left, next to the add button, with the
+        // search bar filling the gap up to the settings button. It only shows
+        // when the full player panel is off screen; with both visible the
+        // mini player is redundant.
         let mini_w = (rect.width() * 0.36).clamp(250.0, 520.0);
         let mini_height = (side + 4.0).clamp(40.0, 56.0);
-        let mini_rect = Rect::from_min_max(
-            pos2(settings_rect.left() - 16.0 - mini_w, cy - mini_height * 0.5),
-            pos2(settings_rect.left() - 16.0, cy + mini_height * 0.5),
-        );
+        let mini_rect = if self.config.ui.panels[PanelKind::Player.index()].visible {
+            None
+        } else {
+            Some(Rect::from_min_max(
+                pos2(plus_rect.right() + 16.0, cy - mini_height * 0.5),
+                pos2(plus_rect.right() + 16.0 + mini_w, cy + mini_height * 0.5),
+            ))
+        };
 
-        let search_left = plus_rect.right() + 16.0;
-        let search_right = (mini_rect.left() - 18.0)
+        let search_left = mini_rect
+            .map(|mini| mini.right() + 18.0)
+            .unwrap_or(plus_rect.right() + 16.0);
+        let search_right = (settings_rect.left() - 16.0)
             .min(search_left + 520.0)
             .max(search_left + 150.0);
         let search_height = (side * 0.84).clamp(34.0, 44.0);
@@ -1713,13 +1843,15 @@ impl PlayerApp {
             }
         }
 
-        self.mini_player(ui, mini_rect, &theme);
+        if let Some(mini_rect) = mini_rect {
+            self.mini_player(ui, mini_rect, &theme);
+        }
 
         if ui::circle_button(
             ui,
             settings_rect,
             "settings-open",
-            Glyph::Sliders,
+            Glyph::Gear,
             &theme,
             GlassSlot::TopBar,
         )
@@ -1733,16 +1865,27 @@ impl PlayerApp {
     fn mini_player(&mut self, ui: &mut Ui, rect: Rect, theme: &Theme) {
         let cover_size = (rect.height() - 6.0).clamp(30.0, 48.0);
         let play_size = (cover_size * 0.82).clamp(28.0, 40.0);
+        let skip_size = (cover_size * 0.66).clamp(24.0, 34.0);
         let cover = Rect::from_min_size(
             pos2(rect.left(), rect.center().y - cover_size * 0.5),
             vec2(cover_size, cover_size),
         );
+        // Transport cluster on the right edge: prev | play | next.
+        let gap = 4.0;
+        let next_rect = Rect::from_center_size(
+            pos2(rect.right() - skip_size * 0.5, rect.center().y),
+            vec2(skip_size, skip_size),
+        );
         let play_rect = Rect::from_center_size(
-            pos2(rect.right() - play_size * 0.5, rect.center().y),
+            pos2(next_rect.left() - gap - play_size * 0.5, rect.center().y),
             vec2(play_size, play_size),
         );
+        let prev_rect = Rect::from_center_size(
+            pos2(play_rect.left() - gap - skip_size * 0.5, rect.center().y),
+            vec2(skip_size, skip_size),
+        );
         let text_left = cover.right() + 10.0;
-        let text_right = play_rect.left() - 12.0;
+        let text_right = prev_rect.left() - 10.0;
 
         let thumb = self
             .current
@@ -1809,6 +1952,33 @@ impl PlayerApp {
             .on_hover_cursor(CursorIcon::PointingHand);
         if cover_resp.clicked() {
             self.toggle_play();
+        }
+
+        if ui::glyph_button(
+            ui,
+            prev_rect,
+            "mini-prev",
+            Glyph::Prev,
+            false,
+            theme,
+            GlassSlot::Transport,
+        )
+        .clicked()
+        {
+            self.previous();
+        }
+        if ui::glyph_button(
+            ui,
+            next_rect,
+            "mini-next",
+            Glyph::Next,
+            false,
+            theme,
+            GlassSlot::Transport,
+        )
+        .clicked()
+        {
+            self.advance(1, false);
         }
 
         let glyph = if self.is_playing() {
@@ -1974,8 +2144,18 @@ impl PlayerApp {
             FontId::proportional(15.0),
             theme.text(),
         );
+
+        // Sort chip for the song list, with the track count beside it.
+        let sort_label = format!("SORT · {}", self.config.ui.track_sort.label());
+        let chip_width = sort_label.len() as f32 * 6.0 + 26.0;
+        let show_chip = head.width() >= chip_width + 170.0;
+        let count_right = if show_chip {
+            head.right() - chip_width - 12.0
+        } else {
+            head.right()
+        };
         painter.text(
-            pos2(head.right(), head.top() + 9.0),
+            pos2(count_right, head.top() + 9.0),
             Align2::RIGHT_CENTER,
             if count == 0 {
                 "—".to_string()
@@ -1985,6 +2165,28 @@ impl PlayerApp {
             FontId::proportional(10.0),
             theme.faint(),
         );
+        if show_chip {
+            let chip_rect = Rect::from_min_size(
+                pos2(head.right() - chip_width, head.top() + 1.0),
+                vec2(chip_width, 20.0),
+            );
+            let chip_response = ui::chip(
+                ui,
+                chip_rect,
+                "song-sort",
+                &sort_label,
+                false,
+                &theme,
+                GlassSlot::OptionChip,
+            )
+            .on_hover_text("Change the song order");
+            if chip_response.clicked() {
+                self.sort_menu_open = true;
+                self.sort_menu_pos = chip_rect.left_bottom() + vec2(0.0, 6.0);
+                // The opening click must not close the menu again this frame.
+                self.sort_menu_ignore_click = true;
+            }
+        }
 
         if self.visible.is_empty() {
             let (empty, _) =
@@ -2004,10 +2206,159 @@ impl PlayerApp {
         let mut clicked = None;
         let mut scroll_to_current = self.scroll_to_current;
 
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .id_salt("current-playlist-list")
-            .show(ui, |ui| {
+        // A landscape box scrolls the tracks sideways as a card strip; a
+        // portrait box keeps the classic vertical list. Scrolling is
+        // wheel-only: the bars are hidden.
+        let avail = ui.available_size();
+        let scroll_rect = ui.available_rect_before_wrap();
+        if avail.x > avail.y {
+            egui::ScrollArea::horizontal()
+                .auto_shrink([false, false])
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .id_salt("current-playlist-strip")
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
+                        let strip_h = avail.y.max(36.0);
+                        for index in visible.iter().copied() {
+                            let track = &self.tracks[index];
+                            let active = current == Some(index);
+                            let card_w = (strip_h * 2.1).clamp(160.0, 300.0);
+                            let (rect, response) =
+                                ui.allocate_exact_size(vec2(card_w, strip_h), Sense::click());
+                            let card = rect.shrink2(vec2(1.0, 2.0));
+                            let painter = ui.painter();
+
+                            let glass = crate::glass::paint_row(
+                                painter,
+                                card,
+                                &theme,
+                                response.hovered(),
+                                active,
+                            );
+                            if !glass {
+                                if active {
+                                    theme::gradient_rect(
+                                        painter,
+                                        card,
+                                        9.0,
+                                        theme::with_alpha(theme.accent_a, 54),
+                                        theme::with_alpha(theme.accent_b, 22),
+                                        theme.angle,
+                                    );
+                                } else if response.hovered() {
+                                    painter.rect_filled(
+                                        card,
+                                        9.0,
+                                        Color32::from_rgba_unmultiplied(255, 255, 255, 12),
+                                    );
+                                }
+                            }
+                            if active {
+                                // Keep the running song obvious above the
+                                // glass face too: a soft tint plus an accent
+                                // marker on the left edge.
+                                if glass {
+                                    theme::gradient_rect(
+                                        painter,
+                                        card,
+                                        9.0,
+                                        theme::with_alpha(theme.accent_a, 62),
+                                        theme::with_alpha(theme.accent_b, 26),
+                                        theme.angle,
+                                    );
+                                }
+                                painter.rect_filled(
+                                    Rect::from_min_max(
+                                        pos2(card.left() + 3.0, card.top() + 9.0),
+                                        pos2(card.left() + 6.0, card.bottom() - 9.0),
+                                    ),
+                                    1.5,
+                                    theme.accent_b,
+                                );
+                            }
+
+                            let cover_side = (strip_h - 14.0).clamp(28.0, 64.0);
+                            let cover = Rect::from_center_size(
+                                pos2(card.left() + 5.0 + cover_side * 0.5, card.center().y),
+                                vec2(cover_side, cover_side),
+                            );
+                            ui::paint_cover(ui, cover, self.thumbs[index].as_ref(), 7.0, &theme);
+
+                            let text_left = cover.right() + 9.0;
+                            let time_width = if card_w >= 190.0 { 36.0 } else { 0.0 };
+                            let text_width = (card.right() - 6.0 - time_width - text_left)
+                                .max(20.0);
+                            let title_font = FontId::proportional(12.0);
+                            let artist_font = FontId::proportional(10.5);
+                            if strip_h >= 58.0 {
+                                painter.text(
+                                    pos2(text_left, card.center().y - 8.0),
+                                    Align2::LEFT_CENTER,
+                                    ui::ellipsize(
+                                        painter,
+                                        &track.title,
+                                        &title_font,
+                                        theme.text(),
+                                        text_width,
+                                    ),
+                                    title_font,
+                                    theme.text(),
+                                );
+                                painter.text(
+                                    pos2(text_left, card.center().y + 8.0),
+                                    Align2::LEFT_CENTER,
+                                    ui::ellipsize(
+                                        painter,
+                                        &track.artist,
+                                        &artist_font,
+                                        theme.muted(),
+                                        text_width,
+                                    ),
+                                    artist_font,
+                                    theme.muted(),
+                                );
+                            } else {
+                                painter.text(
+                                    pos2(text_left, card.center().y),
+                                    Align2::LEFT_CENTER,
+                                    ui::ellipsize(
+                                        painter,
+                                        &track.title,
+                                        &title_font,
+                                        theme.text(),
+                                        text_width,
+                                    ),
+                                    title_font,
+                                    theme.text(),
+                                );
+                            }
+                            if time_width > 0.0 {
+                                painter.text(
+                                    pos2(card.right() - 6.0, card.center().y),
+                                    Align2::RIGHT_CENTER,
+                                    format_duration(track.duration),
+                                    FontId::proportional(10.5),
+                                    theme.faint(),
+                                );
+                            }
+
+                            if active && scroll_to_current {
+                                ui.scroll_to_rect(rect, Some(Align::Center));
+                                scroll_to_current = false;
+                            }
+                            if response.clicked() {
+                                clicked = Some(index);
+                            }
+                        }
+                    });
+                });
+        } else {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .id_salt("current-playlist-list")
+                .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
                 for index in visible.iter().copied() {
                     let track = &self.tracks[index];
@@ -2041,6 +2392,28 @@ impl PlayerApp {
                                 Color32::from_rgba_unmultiplied(255, 255, 255, 12),
                             );
                         }
+                    }
+                    if active {
+                        // The running song stays obvious above the glass face
+                        // too: a soft tint plus an accent edge marker.
+                        if glass {
+                            theme::gradient_rect(
+                                painter,
+                                row,
+                                9.0,
+                                theme::with_alpha(theme.accent_a, 62),
+                                theme::with_alpha(theme.accent_b, 26),
+                                theme.angle,
+                            );
+                        }
+                        painter.rect_filled(
+                            Rect::from_min_max(
+                                pos2(row.left() + 3.0, row.top() + 9.0),
+                                pos2(row.left() + 6.0, row.bottom() - 9.0),
+                            ),
+                            1.5,
+                            theme.accent_b,
+                        );
                     }
 
                     let cover = Rect::from_min_size(
@@ -2096,6 +2469,42 @@ impl PlayerApp {
                     }
                 }
             });
+        }
+
+        // The songs blur out into shadow as they near the border instead of
+        // a straight cut. Mostly very subtle; only the last few pixels
+        // deepen, so almost no content is lost.
+        if avail.x > avail.y {
+            let fade = 26.0_f32;
+            let left_band = Rect::from_min_size(
+                scroll_rect.min,
+                vec2(fade.min(scroll_rect.width()), scroll_rect.height()),
+            );
+            paint_edge_fade(ui.painter(), left_band, true, false);
+            let right_band = Rect::from_min_max(
+                pos2(
+                    (scroll_rect.right() - fade).max(scroll_rect.left()),
+                    scroll_rect.top(),
+                ),
+                scroll_rect.max,
+            );
+            paint_edge_fade(ui.painter(), right_band, true, true);
+        } else {
+            let fade = 22.0_f32;
+            let top_band = Rect::from_min_size(
+                scroll_rect.min,
+                vec2(scroll_rect.width(), fade.min(scroll_rect.height())),
+            );
+            paint_edge_fade(ui.painter(), top_band, false, false);
+            let bottom_band = Rect::from_min_max(
+                pos2(
+                    scroll_rect.left(),
+                    (scroll_rect.bottom() - fade).max(scroll_rect.top()),
+                ),
+                scroll_rect.max,
+            );
+            paint_edge_fade(ui.painter(), bottom_band, false, true);
+        }
 
         self.scroll_to_current = scroll_to_current;
         if let Some(index) = clicked {
@@ -2110,6 +2519,7 @@ impl PlayerApp {
     fn playlists_panel(&mut self, ui: &mut Ui) {
         let theme = self.theme;
         let playlists = self.playlists();
+
         let active = self.active_playlist.clone();
         let mut entries: Vec<(Option<String>, String, usize, Option<TextureHandle>)> =
             Vec::with_capacity(playlists.len() + 1);
@@ -2140,127 +2550,211 @@ impl PlayerApp {
         let gap = 10.0;
         let available_w = ui.available_width();
         let available_h = ui.available_height();
+        let scroll_rect = ui.available_rect_before_wrap();
 
-        // Wide panels keep the single-row strip; tall/narrow panels become a
-        // wrapping grid so the whole collection is reachable with the wheel.
-        let tall = available_h > available_w * 0.8;
-        let card_size = if tall {
-            let columns = (((available_w + gap) / (110.0 + gap)).floor()).max(1.0);
-            ((available_w - gap * (columns - 1.0)) / columns).clamp(64.0, 180.0)
-        } else {
-            (available_h - 4.0).clamp(54.0, 190.0)
-        };
-        let per_row = (((available_w + gap) / (card_size + gap)).floor() as usize).max(1);
-
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .id_salt("playlist-covers")
-            .show(ui, |ui| {
-                ui.spacing_mut().item_spacing = vec2(gap, gap);
-
-                for row in entries.chunks(per_row) {
+        // A landscape box scrolls sideways as a single card strip; a portrait
+        // box wraps the cards into a grid that scrolls with the wheel. The
+        // bars stay hidden — the wheel does the scrolling.
+        let wide = available_w > available_h;
+        if wide {
+            let card_size = (available_h - 4.0).clamp(54.0, 190.0);
+            egui::ScrollArea::horizontal()
+                .auto_shrink([false, false])
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .id_salt("playlist-covers-strip")
+                .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = gap;
-
-                        for (playlist, name, count, texture) in row {
-                            let is_active = active == *playlist;
-                            let (rect, response) =
-                                ui.allocate_exact_size(vec2(card_size, card_size), Sense::click());
-                            if let Some(texture) = texture {
-                                ui::paint_cover(ui, rect, Some(texture), 12.0, &theme);
-                            } else {
-                                theme::gradient_rect(
-                                    ui.painter(),
-                                    rect,
-                                    12.0,
-                                    theme::lerp_color(theme.panel_soft(), theme.accent_a, 0.25),
-                                    theme::lerp_color(theme.panel_bottom(), theme.accent_b, 0.18),
-                                    theme.angle,
-                                );
-                                ui::paint_glyph(
-                                    ui.painter(),
-                                    rect.center(),
-                                    rect.width() * 0.32,
-                                    Glyph::Note,
-                                    theme::with_alpha(theme.text(), 180),
-                                );
-                            }
-
-                            // Bottom shade so the label stays readable over any cover.
-                            let shade = Rect::from_min_max(
-                                pos2(rect.left(), rect.bottom() - rect.height() * 0.42),
-                                rect.max,
-                            );
-                            theme::gradient_rect(
-                                ui.painter(),
-                                shade,
-                                12.0,
-                                Color32::TRANSPARENT,
-                                Color32::from_black_alpha(210),
-                                90.0,
-                            );
-
-                            ui.painter().text(
-                                pos2(rect.left() + 10.0, rect.bottom() - 10.0),
-                                Align2::LEFT_BOTTOM,
-                                ui::ellipsize(
-                                    ui.painter(),
-                                    name,
-                                    &FontId::proportional(12.0),
-                                    theme.text(),
-                                    rect.width() - 20.0,
-                                ),
-                                FontId::proportional(12.0),
-                                theme.text(),
-                            );
-                            ui.painter().text(
-                                pos2(rect.right() - 10.0, rect.top() + 10.0),
-                                Align2::RIGHT_TOP,
-                                format!("{count}"),
-                                FontId::proportional(10.5),
-                                theme::with_alpha(theme.text(), 210),
-                            );
-                            let glass_ring = crate::glass::paint_card_ring(
-                                ui.painter(),
-                                rect,
-                                12.0,
+                        ui.spacing_mut().item_spacing = vec2(gap, 0.0);
+                        for (playlist, name, count, texture) in &entries {
+                            if Self::playlist_card(
+                                ui,
+                                card_size,
+                                playlist,
+                                name,
+                                *count,
+                                texture.as_ref(),
+                                &active,
                                 &theme,
-                                response.hovered(),
-                                is_active,
-                            );
-                            if !glass_ring {
-                                if is_active {
-                                    ui.painter().rect_stroke(
-                                        rect,
-                                        12.0,
-                                        Stroke::new(2.0_f32, theme.accent_b),
-                                        StrokeKind::Inside,
-                                    );
-                                } else if response.hovered() {
-                                    ui.painter().rect_stroke(
-                                        rect,
-                                        12.0,
-                                        Stroke::new(
-                                            1.5_f32,
-                                            theme::with_alpha(theme.accent_a, 120),
-                                        ),
-                                        StrokeKind::Inside,
-                                    );
-                                }
-                            }
-
-                            if response.clicked() {
+                            ) {
                                 selected = Some(playlist.clone());
                             }
                         }
                     });
-                }
-            });
+                });
+        } else {
+            let tall = available_h > available_w * 0.8;
+            let card_size = if tall {
+                let columns = (((available_w + gap) / (110.0 + gap)).floor()).max(1.0);
+                ((available_w - gap * (columns - 1.0)) / columns).clamp(64.0, 180.0)
+            } else {
+                (available_h - 4.0).clamp(54.0, 190.0)
+            };
+            let per_row = (((available_w + gap) / (card_size + gap)).floor() as usize).max(1);
+
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .id_salt("playlist-covers")
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing = vec2(gap, gap);
+
+                    for row in entries.chunks(per_row) {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = gap;
+
+                            for (playlist, name, count, texture) in row {
+                                if Self::playlist_card(
+                                    ui,
+                                    card_size,
+                                    playlist,
+                                    name,
+                                    *count,
+                                    texture.as_ref(),
+                                    &active,
+                                    &theme,
+                                ) {
+                                    selected = Some(playlist.clone());
+                                }
+                            }
+                        });
+                    }
+                });
+        }
+
+        // Covers blur out into shadow as they near the border instead of a
+        // straight cut. Kept subtle so most of the content stays visible.
+        if wide {
+            let fade = 26.0_f32;
+            let left_band = Rect::from_min_size(
+                scroll_rect.min,
+                vec2(fade.min(scroll_rect.width()), scroll_rect.height()),
+            );
+            paint_edge_fade(ui.painter(), left_band, true, false);
+            let right_band = Rect::from_min_max(
+                pos2(
+                    (scroll_rect.right() - fade).max(scroll_rect.left()),
+                    scroll_rect.top(),
+                ),
+                scroll_rect.max,
+            );
+            paint_edge_fade(ui.painter(), right_band, true, true);
+        } else {
+            let fade = 22.0_f32;
+            let top_band = Rect::from_min_size(
+                scroll_rect.min,
+                vec2(scroll_rect.width(), fade.min(scroll_rect.height())),
+            );
+            paint_edge_fade(ui.painter(), top_band, false, false);
+            let bottom_band = Rect::from_min_max(
+                pos2(
+                    scroll_rect.left(),
+                    (scroll_rect.bottom() - fade).max(scroll_rect.top()),
+                ),
+                scroll_rect.max,
+            );
+            paint_edge_fade(ui.painter(), bottom_band, false, true);
+        }
 
         if let Some(playlist) = selected {
-            self.active_playlist = playlist;
-            self.rebuild_visible();
+            self.activate_playlist(playlist);
         }
+    }
+
+    /// One playlist cover card. Returns true when clicked.
+    fn playlist_card(
+        ui: &mut Ui,
+        card_size: f32,
+        playlist: &Option<String>,
+        name: &str,
+        count: usize,
+        texture: Option<&TextureHandle>,
+        active: &Option<String>,
+        theme: &Theme,
+    ) -> bool {
+        let is_active = *active == *playlist;
+        let (rect, response) =
+            ui.allocate_exact_size(vec2(card_size, card_size), Sense::click());
+        if let Some(texture) = texture {
+            ui::paint_cover(ui, rect, Some(texture), 12.0, theme);
+        } else {
+            theme::gradient_rect(
+                ui.painter(),
+                rect,
+                12.0,
+                theme::lerp_color(theme.panel_soft(), theme.accent_a, 0.25),
+                theme::lerp_color(theme.panel_bottom(), theme.accent_b, 0.18),
+                theme.angle,
+            );
+            ui::paint_glyph(
+                ui.painter(),
+                rect.center(),
+                rect.width() * 0.32,
+                Glyph::Note,
+                theme::with_alpha(theme.text(), 180),
+            );
+        }
+
+        // Bottom shade so the label stays readable over any cover.
+        let shade = Rect::from_min_max(
+            pos2(rect.left(), rect.bottom() - rect.height() * 0.42),
+            rect.max,
+        );
+        theme::gradient_rect(
+            ui.painter(),
+            shade,
+            12.0,
+            Color32::TRANSPARENT,
+            Color32::from_black_alpha(210),
+            90.0,
+        );
+
+        ui.painter().text(
+            pos2(rect.left() + 10.0, rect.bottom() - 10.0),
+            Align2::LEFT_BOTTOM,
+            ui::ellipsize(
+                ui.painter(),
+                name,
+                &FontId::proportional(12.0),
+                theme.text(),
+                rect.width() - 20.0,
+            ),
+            FontId::proportional(12.0),
+            theme.text(),
+        );
+        ui.painter().text(
+            pos2(rect.right() - 10.0, rect.top() + 10.0),
+            Align2::RIGHT_TOP,
+            format!("{count}"),
+            FontId::proportional(10.5),
+            theme::with_alpha(theme.text(), 210),
+        );
+        let glass_ring = crate::glass::paint_card_ring(
+            ui.painter(),
+            rect,
+            12.0,
+            theme,
+            response.hovered(),
+            is_active,
+        );
+        if !glass_ring {
+            if is_active {
+                ui.painter().rect_stroke(
+                    rect,
+                    12.0,
+                    Stroke::new(2.0_f32, theme.accent_b),
+                    StrokeKind::Inside,
+                );
+            } else if response.hovered() {
+                ui.painter().rect_stroke(
+                    rect,
+                    12.0,
+                    Stroke::new(1.5_f32, theme::with_alpha(theme.accent_a, 120)),
+                    StrokeKind::Inside,
+                );
+            }
+        }
+
+        response.clicked()
     }
 
     fn player_panel(&mut self, ui: &mut Ui) {
@@ -2272,6 +2766,14 @@ impl PlayerApp {
             0.0
         };
         let art = rect.shrink(border_inset);
+
+        // The artwork is the panel's own background image. In the egui
+        // fallback look it paints on top of the card colour so nothing hides
+        // it; the real glass renderer instead refracts the background copy
+        // through the panel face, which keeps the control glass visible.
+        if !theme.real_glass {
+            self.paint_player_art(ui.painter(), rect, &theme);
+        }
 
         let title = self
             .track()
@@ -2327,6 +2829,16 @@ impl PlayerApp {
         let controls_y = bottom - 22.0;
         let seek_y = controls_y - 34.0;
         let text_y = seek_y - 46.0;
+
+        // A blurred dark spot that gradually soaks into the artwork behind
+        // the song text and the transport — no box, no hard edges. Stacked
+        // radial ramps build a smooth falloff.
+        let spot = pos2(rect.center().x, seek_y - 6.0);
+        let reach = ((right - left) * 0.78).max(160.0);
+        theme::radial_glow(ui.painter(), spot, reach, Color32::BLACK, 36);
+        theme::radial_glow(ui.painter(), spot, reach * 0.62, Color32::BLACK, 32);
+        theme::radial_glow(ui.painter(), spot, reach * 0.36, Color32::BLACK, 38);
+
         let clip = Rect::from_min_max(pos2(left, text_y - 40.0), pos2(right, seek_y + 10.0));
         let text_painter = ui.painter().with_clip_rect(clip);
         text_painter.text(
@@ -3022,7 +3534,7 @@ impl PlayerApp {
         {
             self.config.ui.eq_enabled = !self.config.ui.eq_enabled;
             if let Some(audio) = &self.audio {
-                audio.set_eq(&self.config.ui.eq_gains, self.config.ui.eq_enabled);
+                audio.set_eq(&self.config.ui.eq_gains, self.config.ui.eq_active());
             }
             self.save_config();
         }
@@ -3060,7 +3572,7 @@ impl PlayerApp {
             if let Some(gains) = preset {
                 self.config.ui.eq_gains = gains;
                 if let Some(audio) = &self.audio {
-                    audio.set_eq(&self.config.ui.eq_gains, self.config.ui.eq_enabled);
+                    audio.set_eq(&self.config.ui.eq_gains, self.config.ui.eq_active());
                 }
                 self.save_config();
             }
@@ -3167,7 +3679,7 @@ impl PlayerApp {
         if changed {
             self.config.ui.eq_gains = gains;
             if let Some(audio) = &self.audio {
-                audio.set_eq(&self.config.ui.eq_gains, self.config.ui.eq_enabled);
+                audio.set_eq(&self.config.ui.eq_gains, self.config.ui.eq_active());
             }
         }
         if stopped {
@@ -3183,7 +3695,13 @@ impl PlayerApp {
     }
 
     fn apply_spatial(&mut self) {
+        let active = self.config.ui.spatial_active();
+        self.spatial_active = active;
         if let Some(audio) = &mut self.audio {
+            audio.set_spatial_enabled(active);
+            if !active {
+                audio.set_test_mode(TestMode::Off);
+            }
             audio.set_source_position(spatial::position_from_pad(
                 self.config.ui.spatial_x,
                 self.config.ui.spatial_y,
@@ -3194,6 +3712,26 @@ impl PlayerApp {
             audio.set_reverb(self.config.ui.reverb);
             audio.set_head_yaw(self.config.ui.head_yaw);
             audio.set_hrtf_enabled(self.config.ui.hrtf_enabled);
+        }
+    }
+
+    /// Keeps the renderer in sync with the component being added, hidden or
+    /// switched off from the menu or the settings.
+    fn sync_spatial(&mut self) {
+        if self.config.ui.spatial_active() != self.spatial_active {
+            self.apply_spatial();
+        }
+    }
+
+    /// Keeps the equalizer in sync with the component being added, hidden or
+    /// switched off: hidden panels never touch playback.
+    fn sync_eq(&mut self) {
+        let active = self.config.ui.eq_active();
+        if active != self.eq_active {
+            self.eq_active = active;
+            if let Some(audio) = &self.audio {
+                audio.set_eq(&self.config.ui.eq_gains, active);
+            }
         }
     }
 
@@ -3273,6 +3811,7 @@ impl PlayerApp {
     fn spatial_panel(&mut self, ui: &mut Ui) {
         let theme = self.theme;
         let (head, _) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::hover());
+        let enabled = self.config.ui.spatial_enabled;
         let painter = ui.painter();
         painter.text(
             pos2(head.left(), head.center().y),
@@ -3281,17 +3820,87 @@ impl PlayerApp {
             FontId::proportional(10.5),
             theme.muted(),
         );
-        let hrtf = self.config.ui.hrtf_enabled;
-        painter.text(
-            pos2(head.right(), head.center().y),
-            Align2::RIGHT_CENTER,
-            if hrtf { "HRTF · BINAURAL" } else { "STEREO · PAN" },
-            FontId::proportional(10.0),
-            theme.faint(),
+
+        // The component's on/off switch. Off passes the music through untouched.
+        let toggle = Rect::from_min_size(
+            pos2(head.right() - 46.0, head.center().y - 10.0),
+            vec2(46.0, 20.0),
         );
+        let hrtf = self.config.ui.hrtf_enabled;
+        if enabled {
+            painter.text(
+                pos2(toggle.left() - 10.0, head.center().y),
+                Align2::RIGHT_CENTER,
+                if hrtf { "HRTF · BINAURAL" } else { "STEREO · PAN" },
+                FontId::proportional(10.0),
+                theme.faint(),
+            );
+        }
+        if ui::chip(
+            ui,
+            toggle,
+            "spatial-enable",
+            if enabled { "ON" } else { "OFF" },
+            enabled,
+            &theme,
+            GlassSlot::SettingsControl,
+        )
+        .on_hover_text(
+            "Turn the spatial component on or off. It is bypassed while it is off \
+             or while the panel is not on the dashboard.",
+        )
+        .clicked()
+        {
+            self.config.ui.spatial_enabled = !enabled;
+            self.apply_spatial();
+            self.save_config();
+        }
 
         let full = ui.available_rect_before_wrap();
         if full.width() < 210.0 || full.height() < 150.0 {
+            return;
+        }
+
+        if !enabled {
+            // Nothing here can move the sound while the component is off, so
+            // show a quiet placeholder instead of an inert pad and sliders.
+            theme::gradient_rect(
+                ui.painter(),
+                full,
+                14.0,
+                theme::with_alpha(theme.panel_soft(), 140),
+                theme::with_alpha(theme.panel_bottom(), 190),
+                theme.angle,
+            );
+            ui.painter().text(
+                full.center() - vec2(0.0, 18.0),
+                Align2::CENTER_CENTER,
+                "SPATIAL AUDIO OFF",
+                FontId::proportional(11.5),
+                theme.muted(),
+            );
+            let font = FontId::proportional(9.5);
+            for (index, text) in [
+                "Playback is plain stereo.",
+                "Use the ON chip above to bring it back.",
+            ]
+            .iter()
+            .enumerate()
+            {
+                ui.painter().text(
+                    full.center() + vec2(0.0, index as f32 * 14.0),
+                    Align2::CENTER_CENTER,
+                    ui::ellipsize(
+                        ui.painter(),
+                        text,
+                        &font,
+                        theme.faint(),
+                        full.width() - 24.0,
+                    ),
+                    font.clone(),
+                    theme.faint(),
+                );
+            }
             return;
         }
 
@@ -3835,6 +4444,8 @@ impl PlayerApp {
 
     fn layout_overlay(&mut self, ui: &mut Ui, _frame: Rect, content: Rect) {
         let theme = self.theme;
+        // Components never come closer to each other than this.
+        let gap = self.config.ui.component_gap.max(0.0);
         let mut save = false;
         let mut hide: Option<usize> = None;
         let mut guide_x: Option<f32> = None;
@@ -3916,20 +4527,67 @@ impl PlayerApp {
                     Sense::click_and_drag(),
                 )
                 .on_hover_cursor(CursorIcon::Grab);
+            // Smooth Android-home-screen dragging: the component follows the
+            // pointer exactly, slides around its siblings and never overlaps
+            // them. The grid snap happens once, animated, on release.
+            if move_response.drag_started() {
+                let grab = move_response
+                    .interact_pointer_pos()
+                    .map(|pointer| pointer - rect.min)
+                    .unwrap_or_else(|| rect.size() * 0.5);
+                self.layout_drag = Some(LayoutDrag {
+                    index: kind.index(),
+                    grab,
+                    resizing: false,
+                });
+                self.layout_anim = None;
+            }
             if move_response.dragged() {
-                let delta = move_response.drag_delta();
-                let proposed = Rect::from_min_size(rect.min + delta, rect.size());
-                let (snapped, gx, gy) = snap_layout_move(proposed, content, &others);
+                let grab = self
+                    .layout_drag
+                    .as_ref()
+                    .filter(|drag| !drag.resizing && drag.index == kind.index())
+                    .map(|drag| drag.grab)
+                    .unwrap_or_else(|| rect.size() * 0.5);
+                let proposed = match move_response.interact_pointer_pos() {
+                    Some(pointer) => Rect::from_min_size(pointer - grab, rect.size()),
+                    None => Rect::from_min_size(rect.min + move_response.drag_delta(), rect.size()),
+                };
+                let resolved = resolve_layout_rect(proposed, &others, gap, content);
                 let panel = &mut self.config.ui.panels[kind.index()];
-                panel.x = (snapped.left() - content.left()) / content.width();
-                panel.y = (snapped.top() - content.top()) / content.height();
-                panel.w = snapped.width() / content.width();
-                panel.h = snapped.height() / content.height();
-                guide_x = gx;
-                guide_y = gy;
+                panel.x = (resolved.left() - content.left()) / content.width();
+                panel.y = (resolved.top() - content.top()) / content.height();
+                panel.w = resolved.width() / content.width();
+                panel.h = resolved.height() / content.height();
+                let (targets_x, targets_y) =
+                    layout_snap_targets(&others, content, gap, resolved.size());
+                guide_x = near_alignment(resolved.left(), &targets_x);
+                guide_y = near_alignment(resolved.top(), &targets_y);
             }
             if move_response.drag_stopped() {
-                save = true;
+                let current = self.panel_rect(content, kind);
+                let (targets_x, targets_y) =
+                    layout_snap_targets(&others, content, gap, current.size());
+                let snapped = resolve_layout_rect(
+                    Rect::from_min_size(
+                        pos2(
+                            snap_or_grid(current.left(), &targets_x),
+                            snap_or_grid(current.top(), &targets_y),
+                        ),
+                        current.size(),
+                    ),
+                    &others,
+                    gap,
+                    content,
+                );
+                self.layout_drag = None;
+                self.layout_anim = Some(LayoutAnim {
+                    index: kind.index(),
+                    from: current.min.to_vec2(),
+                    to: snapped.min.to_vec2(),
+                    resizing: false,
+                    start: Instant::now(),
+                });
             }
 
             let handle = Rect::from_center_size(
@@ -3947,25 +4605,56 @@ impl PlayerApp {
                 .circle_filled(handle.center(), 8.0, theme.accent_b);
             ui.painter()
                 .circle_stroke(handle.center(), 8.0, Stroke::new(1.0_f32, theme.text()));
+            if resize_response.drag_started() {
+                self.layout_drag = Some(LayoutDrag {
+                    index: kind.index(),
+                    grab: Vec2::ZERO,
+                    resizing: true,
+                });
+                self.layout_anim = None;
+            }
             if resize_response.dragged() {
-                let delta = resize_response.drag_delta();
-                let proposed = Rect::from_min_size(
+                let corner = resize_response
+                    .interact_pointer_pos()
+                    .unwrap_or(rect.right_bottom());
+                let proposed = Rect::from_min_max(
                     rect.min,
-                    vec2(
-                        (rect.width() + delta.x).max(80.0),
-                        (rect.height() + delta.y).max(60.0),
+                    pos2(
+                        corner.x.max(rect.left() + 80.0),
+                        corner.y.max(rect.top() + 60.0),
                     ),
                 );
-                let (snapped, gx, gy) =
-                    snap_layout_resize(proposed, content, &others, 150.0, 110.0);
+                let resized = clamp_layout_resize(proposed, &others, gap, content);
                 let panel = &mut self.config.ui.panels[kind.index()];
-                panel.w = snapped.width() / content.width();
-                panel.h = snapped.height() / content.height();
-                guide_x = gx;
-                guide_y = gy;
+                panel.w = resized.width() / content.width();
+                panel.h = resized.height() / content.height();
+                let (targets_x, targets_y) = layout_resize_targets(&others, content, gap);
+                guide_x = near_alignment(resized.right(), &targets_x);
+                guide_y = near_alignment(resized.bottom(), &targets_y);
             }
             if resize_response.drag_stopped() {
-                save = true;
+                let current = self.panel_rect(content, kind);
+                let (targets_x, targets_y) = layout_resize_targets(&others, content, gap);
+                let target = clamp_layout_resize(
+                    Rect::from_min_max(
+                        current.min,
+                        pos2(
+                            snap_or_grid(current.right(), &targets_x),
+                            snap_or_grid(current.bottom(), &targets_y),
+                        ),
+                    ),
+                    &others,
+                    gap,
+                    content,
+                );
+                self.layout_drag = None;
+                self.layout_anim = Some(LayoutAnim {
+                    index: kind.index(),
+                    from: current.size(),
+                    to: target.size(),
+                    resizing: true,
+                    start: Instant::now(),
+                });
             }
 
             let delete_rect = Rect::from_center_size(
@@ -4018,6 +4707,45 @@ impl PlayerApp {
         }
         if save {
             self.save_config();
+        }
+    }
+
+    /// Glides a just-dropped component from its drag position to the snapped
+    /// one, then saves the layout. Runs every frame so the glide also
+    /// finishes after the user leaves layout mode.
+    fn advance_layout_anim(&mut self, ctx: &egui::Context) {
+        let Some(anim) = self.layout_anim.as_ref() else {
+            return;
+        };
+        let (index, from, to, resizing, start) =
+            (anim.index, anim.from, anim.to, anim.resizing, anim.start);
+        let screen = ctx.content_rect();
+        let (_, frame_rect) = Self::layout_rects(screen);
+        let content = Self::dashboard_content(frame_rect);
+        if content.width() <= 0.0 || content.height() <= 0.0 {
+            self.layout_anim = None;
+            return;
+        }
+
+        let progress = (start.elapsed().as_secs_f32() / 0.24).clamp(0.0, 1.0);
+        // Ease-out quartic: a very gentle landing on the snapped position.
+        let rest = 1.0 - progress;
+        let eased = 1.0 - rest * rest * rest * rest;
+        let value = from + (to - from) * eased;
+        let panel = &mut self.config.ui.panels[index];
+        if resizing {
+            panel.w = (value.x / content.width()).max(0.02);
+            panel.h = (value.y / content.height()).max(0.02);
+        } else {
+            panel.x = (value.x - content.left()) / content.width();
+            panel.y = (value.y - content.top()) / content.height();
+        }
+
+        if progress >= 1.0 {
+            self.layout_anim = None;
+            self.save_config();
+        } else {
+            ctx.request_repaint();
         }
     }
 
@@ -4441,12 +5169,10 @@ impl PlayerApp {
 
         if let Some((is_track, index)) = action {
             if is_track {
-                self.active_playlist = self.tracks[index].playlist.clone();
-                self.rebuild_visible();
+                self.activate_playlist(self.tracks[index].playlist.clone());
                 self.play_index(index);
             } else if let Some((name, _)) = playlist_hits.get(index) {
-                self.active_playlist = Some(name.clone());
-                self.rebuild_visible();
+                self.activate_playlist(Some(name.clone()));
             }
             self.search_active = false;
             self.search_query.clear();
@@ -4459,6 +5185,112 @@ impl PlayerApp {
                     self.search_active = false;
                 }
             }
+        }
+    }
+
+    /// The song sort menu, opened from the chip in the current playlist.
+    fn sort_menu(&mut self, ctx: &egui::Context) {
+        if !self.sort_menu_open {
+            self.sort_menu_ignore_click = false;
+            return;
+        }
+        let theme = self.theme;
+        let screen = ctx.content_rect();
+        let mut picked: Option<TrackSort> = None;
+
+        egui::Area::new(Id::unique("song-sort-overlay"))
+            .order(egui::Order::Foreground)
+            .fade_in(false)
+            .fixed_pos(screen.min)
+            .show(ctx, |ui| {
+                let (backdrop, _) = ui.allocate_exact_size(screen.size(), Sense::hover());
+                ui.painter().rect_filled(
+                    backdrop,
+                    0.0,
+                    Color32::from_rgba_unmultiplied(0, 0, 0, 24),
+                );
+
+                let height = 26.0 + 5.0 * 34.0 + 12.0;
+                let mut menu_ui = ui.new_child(
+                    UiBuilder::new()
+                        .max_rect(Rect::from_min_size(
+                            self.sort_menu_pos,
+                            vec2(224.0, height),
+                        ))
+                        .id_salt("song-sort-card"),
+                );
+                let menu_glass = crate::glass::enabled(&theme, GlassSlot::Menu);
+                let menu = egui::Frame::NONE
+                    .fill(crate::glass::menu_fill(&theme).unwrap_or_else(|| theme.panel_top()))
+                    .stroke(if menu_glass {
+                        Stroke::NONE
+                    } else {
+                        Stroke::new(1.0_f32, theme.accent_line())
+                    })
+                    .corner_radius(CornerRadius::from(12.0))
+                    .inner_margin(egui::Margin::symmetric(6, 6))
+                    .show(&mut menu_ui, |ui| {
+                        ui.set_min_width(200.0);
+                        ui.label(
+                            egui::RichText::new("SORT SONGS")
+                                .size(9.5)
+                                .color(theme.faint())
+                                .strong(),
+                        );
+                        ui.label(
+                            egui::RichText::new(
+                                "Newest and oldest follow each file's date. Most used counts every play.",
+                            )
+                            .size(9.0)
+                            .color(theme.faint()),
+                        );
+                        ui.add_space(2.0);
+
+                        for sort in [
+                            TrackSort::Added,
+                            TrackSort::Newest,
+                            TrackSort::Oldest,
+                            TrackSort::Title,
+                            TrackSort::MostUsed,
+                        ] {
+                            if ui::menu_toggle_item(
+                                ui,
+                                sort.label(),
+                                self.config.ui.track_sort == sort,
+                                &theme,
+                            )
+                            .clicked()
+                            {
+                                picked = Some(sort);
+                            }
+                        }
+                    });
+                crate::glass::paint_menu_rim(
+                    menu_ui.painter(),
+                    menu.response.rect,
+                    12.0,
+                    &theme,
+                );
+                self.sort_menu_rect = menu.response.rect;
+
+                let clicked = ui.ctx().input(|input| input.pointer.any_click());
+                let pointer = ui.ctx().input(|input| input.pointer.interact_pos());
+                if menu_should_close(
+                    self.sort_menu_ignore_click,
+                    clicked,
+                    pointer,
+                    self.sort_menu_rect,
+                ) {
+                    self.sort_menu_open = false;
+                }
+                self.sort_menu_ignore_click = false;
+            });
+
+        if let Some(sort) = picked {
+            self.config.ui.track_sort = sort;
+            self.sort_menu_open = false;
+            self.rebuild_visible();
+            self.save_config();
         }
     }
 
@@ -4517,7 +5349,7 @@ impl PlayerApp {
                         .strong(),
                 );
                 let close_rect = Rect::from_center_size(
-                    pos2(inner.right() - 2.0, inner.top() + 6.0),
+                    pos2(inner.right() - 14.0, inner.top() + 14.0),
                     vec2(24.0, 24.0),
                 );
                 let close_response =
@@ -5314,7 +6146,7 @@ impl PlayerApp {
         );
         ui.label(
             egui::RichText::new(
-                "Panels snap to each other, to the frame and to the 8 px grid, and they stay inside the safe area. In layout mode the red corner buttons hide a panel; the top-left + brings hidden ones back.",
+                "Drag a component and it follows your pointer smoothly, sliding around its siblings and gliding onto the 8 px grid when you let go. Components never overlap or come closer than the spacing below. The red corner buttons hide a panel; the top-left + brings hidden ones back.",
             )
             .size(10.5)
             .color(theme.faint()),
@@ -5366,6 +6198,142 @@ impl PlayerApp {
         }
 
         ui.add_space(8.0);
+        ui.label(
+            egui::RichText::new("Component spacing")
+                .size(11.0)
+                .color(theme.muted())
+                .strong(),
+        );
+        ui.label(
+            egui::RichText::new(
+                "The minimum distance kept between components. While you drag or resize, a component stops this far from its neighbours instead of covering them.",
+            )
+            .size(10.5)
+            .color(theme.faint()),
+        );
+        let mut gap = self.config.ui.component_gap;
+        if ui
+            .add(egui::Slider::new(&mut gap, 0.0..=60.0).text("minimum gap (px)"))
+            .changed()
+        {
+            self.config.ui.component_gap = gap;
+            self.save_config();
+        }
+
+        ui.add_space(8.0);
+        Self::settings_heading(
+            ui,
+            theme,
+            "LAYOUT PRESETS",
+            "Save the whole look — arrangement, colours, glass and background — under a name, then switch between saved looks with one click.",
+        );
+        ui.horizontal(|ui| {
+            let field_width = (ui.available_width() - 104.0).max(120.0);
+            ui.add(
+                egui::TextEdit::singleline(&mut self.layout_preset_name)
+                    .hint_text("Preset name")
+                    .desired_width(field_width),
+            );
+            if ui::pill_button_sized(
+                ui,
+                92.0,
+                "Save",
+                true,
+                theme,
+                GlassSlot::SettingsControl,
+            )
+            .clicked()
+            {
+                let name = self.layout_preset_name.trim().to_string();
+                if name.is_empty() {
+                    self.notice("Give the preset a name first.", true);
+                } else {
+                    match config::save_layout(&name, &self.config) {
+                        Ok(()) => self.notice(format!("Saved layout “{name}”."), false),
+                        Err(err) => self.notice(err, true),
+                    }
+                    self.layout_preset_name.clear();
+                }
+            }
+        });
+
+        let presets = config::list_layouts();
+        if presets.is_empty() {
+            ui.label(
+                egui::RichText::new("No saved layouts yet — arrange everything, then save.")
+                    .size(10.0)
+                    .color(theme.faint()),
+            );
+        } else {
+            for name in presets {
+                let (row, _) =
+                    ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
+                let painter = ui.painter();
+                painter.text(
+                    pos2(row.left() + 2.0, row.center().y),
+                    Align2::LEFT_CENTER,
+                    ui::ellipsize(
+                        painter,
+                        &name,
+                        &FontId::proportional(12.0),
+                        theme.text(),
+                        (row.width() - 180.0).max(40.0),
+                    ),
+                    FontId::proportional(12.0),
+                    theme.text(),
+                );
+                let delete_rect = Rect::from_center_size(
+                    pos2(row.right() - 41.0, row.center().y),
+                    vec2(70.0, 22.0),
+                );
+                let apply_rect = Rect::from_center_size(
+                    pos2(row.right() - 119.0, row.center().y),
+                    vec2(70.0, 22.0),
+                );
+                if ui::chip(
+                    ui,
+                    apply_rect,
+                    &format!("preset-apply-{name}"),
+                    "APPLY",
+                    false,
+                    theme,
+                    GlassSlot::SettingsControl,
+                )
+                .on_hover_text("Switch to this saved look")
+                .clicked()
+                {
+                    match config::load_layout(&name) {
+                        Some(preset) => {
+                            config::apply_layout(&mut self.config.ui, &preset);
+                            self.refresh_theme(ui.ctx());
+                            // Re-pick the photo/video of the preset.
+                            self.background_loaded = None;
+                            self.save_config();
+                            self.notice(format!("Layout “{name}” applied."), false);
+                        }
+                        None => self.notice("That preset could not be read.", true),
+                    }
+                }
+                if ui::chip(
+                    ui,
+                    delete_rect,
+                    &format!("preset-delete-{name}"),
+                    "DELETE",
+                    false,
+                    theme,
+                    GlassSlot::SettingsControl,
+                )
+                .on_hover_text("Remove this preset")
+                .clicked()
+                {
+                    if config::delete_layout(&name) {
+                        self.notice(format!("Layout “{name}” removed."), false);
+                    }
+                }
+            }
+        }
+
+        ui.add_space(8.0);
         ui.horizontal(|ui| {
             if ui::pill_button_sized(
                 ui,
@@ -5395,7 +6363,7 @@ impl PlayerApp {
         ui.add_space(4.0);
         ui.label(
             egui::RichText::new(
-                "Drag a panel to move it. Pull the bright dot in its bottom-right corner to resize. Measurements snap to the grid, sibling edges and the frame so everything stays aligned. Esc leaves layout mode.",
+                "Drag a panel to move it; it glides onto the grid and its siblings' edges when dropped. Pull the bright dot in its bottom-right corner to resize. Esc leaves layout mode.",
             )
             .size(10.0)
             .color(theme.faint()),
@@ -5686,8 +6654,11 @@ impl PlayerApp {
         self.poll_scan(ctx);
         self.poll_download(ctx);
         self.poll_install(ctx);
+        self.sync_spatial();
+        self.sync_eq();
         self.tick(ctx);
         self.handle_keys(ctx);
+        self.autosave(ctx);
         self.ensure_textures(ctx);
         self.ensure_playlist_textures(ctx);
         self.ensure_background(ctx);
@@ -5768,12 +6739,17 @@ impl PlayerApp {
             );
         }
 
+        // A light gradient only near the bottom, so the image stays clearly
+        // visible while the lower text keeps some contrast.
         theme::gradient_rect(
             painter,
-            art,
+            Rect::from_min_max(
+                pos2(art.left(), art.top() + art.height() * 0.55),
+                art.max,
+            ),
             art_radius,
-            Color32::from_rgba_unmultiplied(5, 5, 8, 40),
-            Color32::from_rgba_unmultiplied(5, 5, 8, 240),
+            Color32::TRANSPARENT,
+            Color32::from_rgba_unmultiplied(5, 5, 8, 120),
             90.0,
         );
     }
@@ -5836,6 +6812,8 @@ impl PlayerApp {
         let real_capable = theme.real_glass;
         self.theme.foreground_only = true;
 
+        self.advance_layout_anim(ctx);
+
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(Color32::TRANSPARENT))
             .show(ui, |ui| {
@@ -5877,6 +6855,7 @@ impl PlayerApp {
                 if self.view == View::Dashboard {
                     self.add_menu(ctx);
                     self.search_overlay(ctx);
+                    self.sort_menu(ctx);
                     if self.settings_open {
                         self.settings_modal(ctx);
                     }
@@ -5918,7 +6897,9 @@ impl PlayerApp {
 }
 
 const LAYOUT_SAFE_PAD: f32 = 6.0;
-const LAYOUT_SNAP: f32 = 7.0;
+/// How close an edge must come to a snap target before it magnetizes. Kept
+/// small so landing feels gentle instead of sticky.
+const LAYOUT_SNAP: f32 = 4.0;
 const LAYOUT_GRID: f32 = 8.0;
 
 fn glass_slider(
@@ -5942,134 +6923,134 @@ fn glass_check(ui: &mut Ui, label: &str, value: &mut bool, changed: &mut bool) {
     }
 }
 
-fn snap_targets(others: &[Rect], content: Rect) -> (Vec<f32>, Vec<f32>) {
+/// Positions a dropped component may snap to: the frame edges, the centre and
+/// the sides of its siblings, always kept `gap` apart.
+fn layout_snap_targets(
+    others: &[Rect],
+    content: Rect,
+    gap: f32,
+    size: Vec2,
+) -> (Vec<f32>, Vec<f32>) {
     let safe = content.shrink(LAYOUT_SAFE_PAD);
-    let mut x = vec![safe.left(), safe.center().x, safe.right()];
-    let mut y = vec![safe.top(), safe.center().y, safe.bottom()];
-    for rect in others {
-        x.extend([rect.left(), rect.center().x, rect.right()]);
-        y.extend([rect.top(), rect.center().y, rect.bottom()]);
+    let mut x = vec![
+        safe.left(),
+        safe.center().x - size.x * 0.5,
+        safe.right() - size.x,
+    ];
+    let mut y = vec![
+        safe.top(),
+        safe.center().y - size.y * 0.5,
+        safe.bottom() - size.y,
+    ];
+    for other in others {
+        x.extend([other.left() - gap, other.right() + gap]);
+        y.extend([other.top() - gap, other.bottom() + gap]);
     }
     (x, y)
 }
 
-fn snap_layout_move(
-    proposed: Rect,
-    content: Rect,
-    others: &[Rect],
-) -> (Rect, Option<f32>, Option<f32>) {
+/// Edges a resized component may snap its bottom-right corner to.
+fn layout_resize_targets(others: &[Rect], content: Rect, gap: f32) -> (Vec<f32>, Vec<f32>) {
     let safe = content.shrink(LAYOUT_SAFE_PAD);
-    let (targets_x, targets_y) = snap_targets(others, content);
-    let width = proposed.width().min(safe.width());
-    let height = proposed.height().min(safe.height());
-    let mut x = proposed.left();
-    let mut y = proposed.top();
+    let mut x = vec![safe.right()];
+    let mut y = vec![safe.bottom()];
+    for other in others {
+        x.push(other.left() - gap);
+        y.push(other.top() - gap);
+    }
+    (x, y)
+}
 
-    let mut best_x: Option<(f32, f32)> = None;
-    for edge in [proposed.left(), proposed.center().x, proposed.right()] {
-        for target in &targets_x {
-            let delta = target - edge;
-            if delta.abs() <= LAYOUT_SNAP
-                && best_x
-                    .map(|(_, best)| delta.abs() < best.abs())
-                    .unwrap_or(true)
-            {
-                best_x = Some((*target, delta));
-            }
+/// Snaps to the closest target when one is within range, otherwise rounds to
+/// the layout grid.
+fn snap_or_grid(value: f32, targets: &[f32]) -> f32 {
+    let mut best = None;
+    let mut best_delta = LAYOUT_SNAP;
+    for &target in targets {
+        let delta = (target - value).abs();
+        if delta <= best_delta {
+            best = Some(target);
+            best_delta = delta;
         }
     }
-    if let Some((_, delta)) = best_x {
-        x += delta;
-    } else {
-        x = (x / LAYOUT_GRID).round() * LAYOUT_GRID;
-    }
+    best.unwrap_or((value / LAYOUT_GRID).round() * LAYOUT_GRID)
+}
 
-    let mut best_y: Option<(f32, f32)> = None;
-    for edge in [proposed.top(), proposed.center().y, proposed.bottom()] {
-        for target in &targets_y {
-            let delta = target - edge;
-            if delta.abs() <= LAYOUT_SNAP
-                && best_y
-                    .map(|(_, best)| delta.abs() < best.abs())
-                    .unwrap_or(true)
-            {
-                best_y = Some((*target, delta));
+/// Returns the guide line position when an edge sits close to a snap target.
+fn near_alignment(value: f32, targets: &[f32]) -> Option<f32> {
+    targets
+        .iter()
+        .copied()
+        .find(|target| (target - value).abs() <= 1.5)
+}
+
+/// Pushes `rect` out of every sibling (kept `gap` away) and back inside the
+/// content area. The push always takes the shortest exit, so a dragged
+/// component slides around its neighbours instead of covering them.
+fn resolve_layout_rect(mut rect: Rect, others: &[Rect], gap: f32, bounds: Rect) -> Rect {
+    for _ in 0..4 {
+        let mut moved = false;
+        for other in others {
+            let zone = other.expand(gap);
+            let overlap_x = rect.left() < zone.right() && rect.right() > zone.left();
+            let overlap_y = rect.top() < zone.bottom() && rect.bottom() > zone.top();
+            if !overlap_x || !overlap_y {
+                continue;
             }
+            let exit_right = zone.right() - rect.left();
+            let exit_left = rect.right() - zone.left();
+            let exit_down = zone.bottom() - rect.top();
+            let exit_up = rect.bottom() - zone.top();
+            let push_x = if exit_right <= exit_left {
+                exit_right
+            } else {
+                -exit_left
+            };
+            let push_y = if exit_down <= exit_up {
+                exit_down
+            } else {
+                -exit_up
+            };
+            if push_x.abs() <= push_y.abs() {
+                rect = rect.translate(vec2(push_x, 0.0));
+            } else {
+                rect = rect.translate(vec2(0.0, push_y));
+            }
+            moved = true;
+        }
+        if !moved {
+            break;
         }
     }
-    if let Some((_, delta)) = best_y {
-        y += delta;
-    } else {
-        y = (y / LAYOUT_GRID).round() * LAYOUT_GRID;
-    }
-
-    x = x.clamp(safe.left(), (safe.right() - width).max(safe.left()));
-    y = y.clamp(safe.top(), (safe.bottom() - height).max(safe.top()));
-    (
-        Rect::from_min_size(pos2(x, y), vec2(width, height)),
-        best_x.map(|(target, _)| target),
-        best_y.map(|(target, _)| target),
+    let max_x = (bounds.right() - rect.width()).max(bounds.left());
+    let max_y = (bounds.bottom() - rect.height()).max(bounds.top());
+    Rect::from_min_size(
+        pos2(
+            rect.left().clamp(bounds.left(), max_x),
+            rect.top().clamp(bounds.top(), max_y),
+        ),
+        rect.size(),
     )
 }
 
-fn snap_layout_resize(
-    proposed: Rect,
-    content: Rect,
-    others: &[Rect],
-    min_width: f32,
-    min_height: f32,
-) -> (Rect, Option<f32>, Option<f32>) {
-    let safe = content.shrink(LAYOUT_SAFE_PAD);
-    let (targets_x, targets_y) = snap_targets(others, content);
-    let mut right = proposed.right();
-    let mut bottom = proposed.bottom();
-
-    let mut best_x: Option<(f32, f32)> = None;
-    for target in &targets_x {
-        let delta = target - proposed.right();
-        if delta.abs() <= LAYOUT_SNAP
-            && best_x
-                .map(|(_, best)| delta.abs() < best.abs())
-                .unwrap_or(true)
-        {
-            best_x = Some((*target, delta));
+/// Clamps a resized component (anchored at its top-left) so the bottom-right
+/// corner never crosses into a sibling or out of the content area.
+fn clamp_layout_resize(rect: Rect, others: &[Rect], gap: f32, bounds: Rect) -> Rect {
+    let safe = bounds.shrink(LAYOUT_SAFE_PAD);
+    let mut right = rect.right().min(safe.right()).max(rect.left());
+    let mut bottom = rect.bottom().min(safe.bottom()).max(rect.top());
+    for other in others {
+        let zone = other.expand(gap);
+        let overlaps_y = rect.top() < zone.bottom() && rect.bottom() > zone.top();
+        let overlaps_x = rect.left() < zone.right() && rect.right() > zone.left();
+        if overlaps_y && zone.left() > rect.left() {
+            right = right.min(zone.left());
+        }
+        if overlaps_x && zone.top() > rect.top() {
+            bottom = bottom.min(zone.top());
         }
     }
-    if let Some((_, delta)) = best_x {
-        right += delta;
-    } else {
-        right = (right / LAYOUT_GRID).round() * LAYOUT_GRID;
-    }
-
-    let mut best_y: Option<(f32, f32)> = None;
-    for target in &targets_y {
-        let delta = target - proposed.bottom();
-        if delta.abs() <= LAYOUT_SNAP
-            && best_y
-                .map(|(_, best)| delta.abs() < best.abs())
-                .unwrap_or(true)
-        {
-            best_y = Some((*target, delta));
-        }
-    }
-    if let Some((_, delta)) = best_y {
-        bottom += delta;
-    } else {
-        bottom = (bottom / LAYOUT_GRID).round() * LAYOUT_GRID;
-    }
-
-    right = right
-        .max(proposed.left() + min_width.min(safe.width()))
-        .min(safe.right());
-    bottom = bottom
-        .max(proposed.top() + min_height.min(safe.height()))
-        .min(safe.bottom());
-
-    (
-        Rect::from_min_max(proposed.min, pos2(right, bottom)),
-        best_x.map(|(target, _)| target),
-        best_y.map(|(target, _)| target),
-    )
+    Rect::from_min_max(rect.min, pos2(right, bottom))
 }
 
 fn format_duration(seconds: f32) -> String {    if !seconds.is_finite() || seconds < 0.0 {
@@ -6112,6 +7093,9 @@ fn configure_style(ctx: &egui::Context, theme: &Theme) {
     style.visuals = visuals;
     style.spacing.item_spacing = vec2(8.0, 8.0);
     style.spacing.button_padding = vec2(10.0, 6.0);
+    // One-direction scroll areas (the horizontal card strips) should react
+    // to the mouse wheel without requiring a tilted wheel or Shift.
+    style.always_scroll_the_only_direction = true;
     ctx.set_style_of(egui::Theme::Dark, style.clone());
     ctx.set_style_of(egui::Theme::Light, style);
 }
@@ -6128,6 +7112,71 @@ fn menu_should_close(
     match pointer {
         Some(pos) => !rect.contains(pos),
         None => false,
+    }
+}
+
+/// Content dims into shadow near a scroll border instead of getting a
+/// straight cut. Two stacked near-black ramps keep the transition free of a
+/// visible start line: the inner part is barely there, only the last few
+/// pixels at the edge deepen enough to hide the clip. `edge_on_low_side`
+/// picks whether the border sits at the band's low (left/top) or high
+/// (right/bottom) end.
+fn paint_edge_fade(painter: &egui::Painter, band: Rect, horizontal: bool, edge_on_low_side: bool) {
+    let thickness = if horizontal {
+        band.width()
+    } else {
+        band.height()
+    };
+    if thickness <= 1.0 {
+        return;
+    }
+
+    let outer = (thickness * 0.4).min(9.0);
+    let strong = Color32::from_black_alpha(105);
+    let mid = Color32::from_black_alpha(40);
+
+    let (edge_strip, inner_strip) = if horizontal {
+        if edge_on_low_side {
+            let split = band.right() - outer;
+            (
+                Rect::from_min_max(pos2(split, band.top()), band.max),
+                Rect::from_min_max(band.min, pos2(split, band.bottom())),
+            )
+        } else {
+            let split = band.left() + outer;
+            (
+                Rect::from_min_size(band.min, vec2(outer, band.height())),
+                Rect::from_min_max(pos2(split, band.top()), band.max),
+            )
+        }
+    } else if edge_on_low_side {
+        let split = band.bottom() - outer;
+        (
+            Rect::from_min_max(pos2(band.left(), split), band.max),
+            Rect::from_min_max(band.min, pos2(band.right(), split)),
+        )
+    } else {
+        let split = band.top() + outer;
+        (
+            Rect::from_min_size(band.min, vec2(band.width(), outer)),
+            Rect::from_min_max(pos2(band.left(), split), band.max),
+        )
+    };
+
+    if horizontal {
+        if edge_on_low_side {
+            theme::gradient_rect(painter, edge_strip, 0.0, mid, strong, 0.0);
+            theme::gradient_rect(painter, inner_strip, 0.0, Color32::TRANSPARENT, mid, 0.0);
+        } else {
+            theme::gradient_rect(painter, edge_strip, 0.0, strong, mid, 0.0);
+            theme::gradient_rect(painter, inner_strip, 0.0, mid, Color32::TRANSPARENT, 0.0);
+        }
+    } else if edge_on_low_side {
+        theme::gradient_rect(painter, edge_strip, 0.0, mid, strong, 90.0);
+        theme::gradient_rect(painter, inner_strip, 0.0, Color32::TRANSPARENT, mid, 90.0);
+    } else {
+        theme::gradient_rect(painter, edge_strip, 0.0, strong, mid, 90.0);
+        theme::gradient_rect(painter, inner_strip, 0.0, mid, Color32::TRANSPARENT, 90.0);
     }
 }
 

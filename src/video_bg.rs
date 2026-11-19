@@ -16,7 +16,8 @@ const FRAME_BYTES: usize = WIDTH * HEIGHT * 4;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Looping video background: ffmpeg decodes frames into RGBA and the latest one
-/// is uploaded to a texture. Falls back silently (no texture) when unavailable.
+/// is uploaded to a texture. Failures are reported through [`Self::take_error`]
+/// instead of being silently ignored.
 pub struct VideoBackground {
     path: Option<PathBuf>,
     texture: Option<TextureHandle>,
@@ -24,6 +25,10 @@ pub struct VideoBackground {
     stop: Arc<AtomicBool>,
     pid: Option<u32>,
     has_frame: bool,
+    /// Why decoding could not start, if it could not.
+    error: Option<String>,
+    /// Set by the reader thread when ffmpeg exited on its own.
+    died: Arc<AtomicBool>,
 }
 
 impl Default for VideoBackground {
@@ -41,6 +46,8 @@ impl VideoBackground {
             stop: Arc::new(AtomicBool::new(false)),
             pid: None,
             has_frame: false,
+            error: None,
+            died: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -56,6 +63,12 @@ impl VideoBackground {
         if let Some(path) = path {
             self.start(path, ctx);
         }
+    }
+
+    /// Why decoding could not start, if it could not. Cleared when read so
+    /// the caller shows each failure exactly once.
+    pub fn take_error(&mut self) -> Option<String> {
+        self.error.take()
     }
 
     /// Uploads the freshest decoded frame, if any.
@@ -78,6 +91,13 @@ impl VideoBackground {
 
         if disconnected {
             self.receiver = None;
+            if self.died.load(Ordering::Acquire) {
+                self.error = Some(
+                    "The background video stopped early — ffmpeg exited. \
+                     The file may be damaged or use an unsupported codec."
+                        .to_string(),
+                );
+            }
         }
 
         let Some(frame) = latest else {
@@ -107,7 +127,17 @@ impl VideoBackground {
     }
 
     fn start(&mut self, path: &Path, ctx: &egui::Context) {
+        if !path.is_file() {
+            self.error = Some(format!(
+                "Background video not found: {}",
+                path.display()
+            ));
+            return;
+        }
+
         let Some(ffmpeg) = find_ffmpeg() else {
+            self.error =
+                Some("Background video needs ffmpeg.exe in the bin folder.".to_string());
             return;
         };
 
@@ -144,18 +174,25 @@ impl VideoBackground {
         }
 
         let Ok(mut child) = command.spawn() else {
+            self.error = Some(format!(
+                "Could not start ffmpeg for the background video ({}).",
+                ffmpeg.display()
+            ));
             return;
         };
         let Some(mut stdout) = child.stdout.take() else {
             let _ = child.kill();
+            self.error = Some("ffmpeg gave no output pipe for the video.".to_string());
             return;
         };
 
         self.pid = Some(child.id());
         self.stop = Arc::new(AtomicBool::new(false));
         self.has_frame = false;
+        self.died = Arc::new(AtomicBool::new(false));
 
         let stop = self.stop.clone();
+        let died = self.died.clone();
         let (sender, receiver) = sync_channel::<Vec<u8>>(2);
         self.receiver = Some(receiver);
 
@@ -183,6 +220,11 @@ impl VideoBackground {
                     }
                     Err(_) => break,
                 }
+            }
+
+            // Only a genuine failure, not a requested shutdown, is reported.
+            if !stop.load(Ordering::Acquire) {
+                died.store(true, Ordering::Release);
             }
 
             let _ = child.kill();

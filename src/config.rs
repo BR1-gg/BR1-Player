@@ -1,10 +1,64 @@
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-pub const DEFAULT_QUALITY: u16 = 192;
-pub const DEFAULT_PARALLEL: usize = 3;
+pub const DEFAULT_QUALITY: u16 = 256;
+pub const DEFAULT_PARALLEL: usize = 6;
 pub const PANEL_COUNT: usize = 7;
+/// Index of the spatial audio panel in [`UiConfig::panels`].
+pub const SPATIAL_PANEL: usize = 6;
+/// Index of the equalizer panel in [`UiConfig::panels`].
+pub const EQUALIZER_PANEL: usize = 4;
 pub const EQ_BANDS: usize = 10;
+
+/// How the current playlist's song list is ordered.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TrackSort {
+    /// The order songs were added to the library (scan order).
+    #[default]
+    Added,
+    /// Newest file date first.
+    Newest,
+    /// Oldest file date first.
+    Oldest,
+    /// Alphabetical by title.
+    Title,
+    /// Most-played songs first.
+    MostUsed,
+}
+
+impl TrackSort {
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Added => "added",
+            Self::Newest => "newest",
+            Self::Oldest => "oldest",
+            Self::Title => "title",
+            Self::MostUsed => "most_used",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "added" => Some(Self::Added),
+            "newest" => Some(Self::Newest),
+            "oldest" => Some(Self::Oldest),
+            "title" => Some(Self::Title),
+            "most_used" => Some(Self::MostUsed),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Added => "ADDED",
+            Self::Newest => "NEWEST",
+            Self::Oldest => "OLDEST",
+            Self::Title => "TITLE",
+            Self::MostUsed => "MOST USED",
+        }
+    }
+}
 
 /// One dashboard panel, stored as a fraction of the dashboard's inner area so
 /// the layout follows the window size.
@@ -111,7 +165,7 @@ pub struct GlassTargets {
 impl Default for GlassTargets {
     fn default() -> Self {
         // The set chosen for BR1 Player: transport, player chips, downloader
-        // actions, menus, lists/cards, panels/modals and slider knobs.
+        // actions, menus, panels/modals and slider knobs. Lists stay flat.
         Self {
             top_bar: false,
             transport: true,
@@ -119,7 +173,7 @@ impl Default for GlassTargets {
             downloader_actions: true,
             option_chips: false,
             menus: true,
-            lists: true,
+            lists: false,
             sliders: true,
             panels: true,
             settings_controls: false,
@@ -180,17 +234,16 @@ pub struct GlassConfig {
 
 impl Default for GlassConfig {
     fn default() -> Self {
-        // Values from liquid-rust `Material::regular()` and
-        // `Appearance::default()`, with the dark scheme on because the app's
-        // canvas is near black.
+        // The tuned BR1 Player look: liquid glass off by default (flat
+        // surfaces), with the user's material preset ready in Settings.
         Self {
-            enabled: true,
-            refraction: 0.7,
-            depth: 30.0,
-            dispersion: 0.2,
-            frost: 10.0,
+            enabled: false,
+            refraction: 1.0,
+            depth: 80.0,
+            dispersion: 0.88,
+            frost: 0.0,
             splay: 0.2,
-            specular: 0.3,
+            specular: 0.35,
             rim: 0.157,
             rim_shade: 0.05,
             hairline: 0.0,
@@ -427,46 +480,60 @@ pub struct UiConfig {
     pub hrtf_enabled: bool,
     /// Identifier of the selected HRTF set (`builtin:studio` or `sofa:...`).
     pub hrtf_set: String,
+    /// Render playback through the spatial component.
+    pub spatial_enabled: bool,
     pub volume: f32,
     pub muted: bool,
+    /// Minimum distance kept between dashboard components, in points.
+    pub component_gap: f32,
+    /// How the current playlist's song list is ordered.
+    pub track_sort: TrackSort,
+    /// Times each song was played, keyed by file path, for the most-used sort.
+    pub track_plays: BTreeMap<String, u64>,
     /// Apple-style liquid glass for the selected component groups.
     pub liquid: GlassConfig,
 }
 
 impl Default for UiConfig {
     fn default() -> Self {
-        // Proportions taken from the 1920x1080 design: the dashboard frame is
-        // 1861x957 at (32,94), and the five panels sit inside it.
+        // BR1 Player's signature look (v0.2.0): green/blue accents on a deep
+        // near-black canvas, with the downloader, equalizer and spatial audio
+        // components off the dashboard (and their processors off with them)
+        // and the visualizer docked bottom right.
         Self {
-            accent_a: [124, 92, 255],
-            accent_b: [34, 211, 238],
-            angle: 132.0,
-            glass: 0.62,
-            radius: 24.0,
-            glow: 0.62,
-            frame_color: [18, 16, 26],
+            accent_a: [70, 220, 132],
+            accent_b: [30, 168, 220],
+            angle: 145.0,
+            glass: 1.0,
+            radius: 26.5,
+            glow: 1.0,
+            frame_color: [8, 19, 14],
             frame_visible: true,
-            frame_opacity: 0.92,
-            frame_border_visible: true,
-            frame_border_width: 1.5,
-            panel_border_visible: true,
-            panel_border_width: 1.0,
-            background_color: [16, 16, 22],
+            frame_opacity: 0.40,
+            frame_border_visible: false,
+            frame_border_width: 0.0,
+            panel_border_visible: false,
+            panel_border_width: 1.30,
+            background_color: [8, 16, 12],
             background_image: None,
             background_video: None,
-            background_dim: 0.55,
+            background_dim: 0.0,
             panels: [
                 // Current playlist (left)
                 PanelRect::new(0.02445, 0.04702, 0.20016, 0.58934),
                 // Player (centre)
                 PanelRect::new(0.23267, 0.04702, 0.43471, 0.58934),
-                // Downloader (right)
-                PanelRect::new(0.67598, 0.04702, 0.29876, 0.58934),
+                // Downloader (right) — off the dashboard by default
+                PanelRect {
+                    x: 0.67598,
+                    y: 0.04702,
+                    w: 0.29876,
+                    h: 0.58934,
+                    visible: false,
+                },
                 // Playlist covers (bottom, spanning left + centre)
                 PanelRect::new(0.02445, 0.65413, 0.64293, 0.29676),
-                // Equalizer (bottom right)
-                PanelRect::new(0.67598, 0.65413, 0.29876, 0.29676),
-                // Audio visualizer — hidden until added from the component menu
+                // Equalizer (bottom right) — off the dashboard by default
                 PanelRect {
                     x: 0.67598,
                     y: 0.65413,
@@ -474,29 +541,49 @@ impl Default for UiConfig {
                     h: 0.29676,
                     visible: false,
                 },
-                // Spatial audio — hidden until added from the component menu
+                // Audio visualizer (bottom right)
+                PanelRect::new(0.68299, 0.65413, 0.26097, 0.29676),
+                // Spatial audio (right) — off the dashboard by default
                 PanelRect {
-                    x: 0.23267,
-                    y: 0.65413,
-                    w: 0.29876,
-                    h: 0.29676,
+                    x: 0.68299,
+                    y: 0.04702,
+                    w: 0.26097,
+                    h: 0.58934,
                     visible: false,
                 },
             ],
-            eq_enabled: true,
-            eq_gains: [0.0; EQ_BANDS],
+            eq_enabled: false,
+            eq_gains: [-2.0, -1.0, 0.0, 2.0, 4.0, 4.0, 3.0, 1.0, 0.0, -1.0],
             spatial_x: 0.0,
             spatial_y: 0.0,
-            room_size: 8.0,
+            room_size: 2.0,
             reverb: 0.0,
             spatial_height: 0.0,
             head_yaw: 0.0,
             hrtf_enabled: true,
             hrtf_set: "builtin:studio".to_string(),
-            volume: 0.8,
+            spatial_enabled: false,
+            volume: 0.306,
             muted: false,
+            component_gap: 8.0,
+            track_sort: TrackSort::default(),
+            track_plays: BTreeMap::new(),
             liquid: GlassConfig::default(),
         }
+    }
+}
+
+impl UiConfig {
+    /// True when the equalizer should process playback: the component is on
+    /// the dashboard and the user has not switched it off.
+    pub fn eq_active(&self) -> bool {
+        self.eq_enabled && self.panels[EQUALIZER_PANEL].visible
+    }
+
+    /// True when playback should go through the spatial renderer: the
+    /// component is on the dashboard and the user has not switched it off.
+    pub fn spatial_active(&self) -> bool {
+        self.spatial_enabled && self.panels[SPATIAL_PANEL].visible
     }
 }
 
@@ -618,7 +705,13 @@ fn panel_key(index: usize) -> &'static str {
 }
 
 pub fn load_from(path: &Path) -> Option<Config> {
-    let text = std::fs::read_to_string(path).ok()?;
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) => {
+            audit(&format!("could not read {}: {error}", path.display()));
+            return None;
+        }
+    };
 
     let mut root = None;
     let mut quality = DEFAULT_QUALITY;
@@ -773,12 +866,33 @@ pub fn load_from(path: &Path) -> Option<Config> {
                     ui.hrtf_set = value.to_string();
                 }
             }
+            "ui_spatial_enabled" => ui.spatial_enabled = parse_bool(value),
             "volume" => {
                 if let Ok(parsed) = value.parse::<f32>() {
                     ui.volume = parsed.clamp(0.0, 1.0);
                 }
             }
             "muted" => ui.muted = value == "1" || value.eq_ignore_ascii_case("true"),
+            "ui_component_gap" => set_f32(&mut ui.component_gap, value, 0.0, 80.0),
+            "ui_track_sort" => {
+                if let Some(sort) = TrackSort::parse(value) {
+                    ui.track_sort = sort;
+                }
+            }
+            "ui_track_plays" => {
+                // Entries joined by tabs, each `path=count`. File paths cannot
+                // contain tabs, so the split is unambiguous.
+                for entry in value.split('\t') {
+                    if let Some((path, count)) = entry.rsplit_once('=') {
+                        if path.is_empty() {
+                            continue;
+                        }
+                        if let Ok(count) = count.trim().parse::<u64>() {
+                            ui.track_plays.insert(path.to_string(), count);
+                        }
+                    }
+                }
+            }
             "ui_glass_enabled" => ui.liquid.enabled = parse_bool(value),
             "ui_glass_refraction" => set_f32(&mut ui.liquid.refraction, value, 0.0, 1.0),
             "ui_glass_depth" => set_f32(&mut ui.liquid.depth, value, 0.0, 120.0),
@@ -887,19 +1001,24 @@ pub fn load_from(path: &Path) -> Option<Config> {
         ui.spatial_height = 0.0;
     }
 
-    root.map(|library_root| Config {
-        library_root,
-        quality,
-        parallel,
-        ui,
-    })
+    match root {
+        Some(library_root) => Some(Config {
+            library_root,
+            quality,
+            parallel,
+            ui,
+        }),
+        None => {
+            audit(&format!("{} has no library_root entry", path.display()));
+            None
+        }
+    }
 }
 
 pub fn save_to(path: &Path, config: &Config) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
-    }
-    let ui = &config.ui;
+    }    let ui = &config.ui;
     let mut text = format!(
         "library_root={}\nquality={}\nparallel={}\n\
          ui_accent_a=#{:02X}{:02X}{:02X}\n\
@@ -929,6 +1048,7 @@ pub fn save_to(path: &Path, config: &Config) {
          ui_head_yaw={:.2}\n\
          ui_hrtf_enabled={}\n\
          ui_hrtf_set={}\n\
+         ui_spatial_enabled={}\n\
          volume={:.3}\n\
          muted={}\n",
         config.library_root.display(),
@@ -979,6 +1099,7 @@ pub fn save_to(path: &Path, config: &Config) {
         ui.head_yaw,
         if ui.hrtf_enabled { 1 } else { 0 },
         ui.hrtf_set,
+        if ui.spatial_enabled { 1 } else { 0 },
         ui.volume,
         if ui.muted { 1 } else { 0 },
     );
@@ -993,8 +1114,63 @@ pub fn save_to(path: &Path, config: &Config) {
             if panel.visible { 1 } else { 0 }
         ));
     }
+    let _ = writeln!(text, "ui_component_gap={:.1}", ui.component_gap);
+    let _ = writeln!(text, "ui_track_sort={}", ui.track_sort.key());
+    if !ui.track_plays.is_empty() {
+        let plays = ui
+            .track_plays
+            .iter()
+            .map(|(path, count)| format!("{path}={count}"))
+            .collect::<Vec<_>>()
+            .join("\t");
+        let _ = writeln!(text, "ui_track_plays={plays}");
+    }
     push_glass(&mut text, &ui.liquid);
-    let _ = std::fs::write(path, text);
+
+    // Write through a temporary file so a half-written config can never
+    // replace the previous good copy, and keep that copy as a backup the
+    // loader falls back to when the main file is unusable.
+    let staging = path.with_extension("tmp");
+    let backup = backup_path(path);
+    if let Err(error) = std::fs::write(&staging, &text) {
+        audit(&format!("could not write {}: {error}", staging.display()));
+        return;
+    }
+    if path.is_file() {
+        let _ = std::fs::copy(path, &backup);
+    }
+    if let Err(error) = std::fs::rename(&staging, path) {
+        audit(&format!(
+            "could not replace {} ({}): {error}",
+            path.display(),
+            std::fs::metadata(&staging).map(|m| m.len()).unwrap_or(0)
+        ));
+    }
+}
+
+/// The `.bak` twin of a config or preset file, kept by [`save_to`].
+fn backup_path(path: &Path) -> PathBuf {
+    path.with_extension("bak")
+}
+
+/// Appends one diagnostic line to `save.log` next to the config so load and
+/// save problems can be traced after the fact. Successful saves are visible
+/// from the config's own timestamp and are not logged, keeping this tiny.
+fn audit(message: &str) {
+    use std::io::Write as _;
+    let Some(config) = config_path() else {
+        return;
+    };
+    let log = config.with_extension("log");
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default();
+    let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&log)
+    else {
+        return;
+    };
+    let _ = writeln!(file, "[{stamp}] {message}");
 }
 
 fn push_glass(text: &mut String, glass: &GlassConfig) {
@@ -1115,26 +1291,163 @@ fn push_tone(text: &mut String, prefix: &str, tone: &GlassTone) {
 }
 
 /// Reads the config, migrating the old single-path settings file if needed.
-pub fn load() -> Option<Config> {
+/// Falls back to the backup kept by [`save_to`] when the main file is
+/// unreadable or damaged, so a broken file never silently resets the UI.
+/// Every branch records a line in `save.log` for later diagnosis.
+pub fn load_reported() -> (Option<Config>, Option<String>) {
     if let Some(path) = config_path() {
         if path.exists() {
-            return load_from(&path);
+            if let Some(config) = load_from(&path) {
+                audit(&format!("app started, loaded config from {}", path.display()));
+                return (Some(config), None);
+            }
+            let backup = backup_path(&path);
+            if let Some(config) = load_from(&backup) {
+                audit("config unusable, recovered from the backup copy");
+                return (
+                    Some(config),
+                    Some("Your settings file was damaged; everything was recovered from the backup copy.".to_string()),
+                );
+            }
+            audit("config and backup both unusable; starting from defaults");
+            return (
+                None,
+                Some("Your settings could not be read and no backup was usable, so defaults were restored.".to_string()),
+            );
         }
     }
 
-    let legacy = legacy_settings_path()?;
-    let text = std::fs::read_to_string(legacy).ok()?;
-    let text = text.trim();
-    if text.is_empty() {
-        return None;
+    match legacy_settings_path().and_then(|legacy| std::fs::read_to_string(legacy).ok()) {
+        Some(text) if !text.trim().is_empty() => {
+            return (Some(Config::with_root(PathBuf::from(text.trim()))), None)
+        }
+        _ => (None, None),
     }
-    Some(Config::with_root(PathBuf::from(text)))
 }
 
 pub fn save(config: &Config) {
     if let Some(path) = config_path() {
         save_to(&path, config);
     }
+}
+
+/* ---------- named layout presets ---------- */
+
+/// Folder holding one `.txt` file per saved layout preset.
+pub fn layout_dir() -> Option<PathBuf> {
+    std::env::var_os("APPDATA").map(|base| PathBuf::from(base).join("DefPlayer").join("layouts"))
+}
+
+/// Keeps preset names filesystem- and display-safe.
+pub fn sanitize_preset_name(name: &str) -> String {
+    let cleaned: String = name
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_alphanumeric() || matches!(ch, ' ' | '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim().to_string();
+    if trimmed.is_empty() {
+        "Preset".to_string()
+    } else {
+        trimmed.chars().take(40).collect()
+    }
+}
+
+fn layout_file(dir: &Path, name: &str) -> PathBuf {
+    dir.join(format!("{}.txt", sanitize_preset_name(name)))
+}
+
+/// Snapshots the whole config (looks + layout) under a preset name.
+pub fn save_layout_as(dir: &Path, name: &str, config: &Config) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|err| format!("Cannot create the layouts folder: {err}"))?;
+    let path = layout_file(dir, name);
+    save_to(&path, config);
+    Ok(())
+}
+
+/// Preset names available in `dir`, alphabetical.
+pub fn list_layouts_in(dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) == Some("txt") {
+                path.file_stem().and_then(|stem| stem.to_str()).map(str::to_string)
+            } else {
+                None
+            }
+        })
+        .collect();
+    names.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    names
+}
+
+/// Loads a preset's UI configuration.
+pub fn load_layout_from(dir: &Path, name: &str) -> Option<UiConfig> {
+    let path = layout_file(dir, name);
+    load_from(&path).map(|config| config.ui)
+}
+
+/// Copies the visual identity of a preset onto `target`: layout, colours,
+/// glass and background settings. Playback state is left alone.
+pub fn apply_layout(target: &mut UiConfig, from: &UiConfig) {
+    target.accent_a = from.accent_a;
+    target.accent_b = from.accent_b;
+    target.angle = from.angle;
+    target.glass = from.glass;
+    target.radius = from.radius;
+    target.glow = from.glow;
+    target.frame_color = from.frame_color;
+    target.frame_visible = from.frame_visible;
+    target.frame_opacity = from.frame_opacity;
+    target.frame_border_visible = from.frame_border_visible;
+    target.frame_border_width = from.frame_border_width;
+    target.panel_border_visible = from.panel_border_visible;
+    target.panel_border_width = from.panel_border_width;
+    target.background_color = from.background_color;
+    target.background_image = from.background_image.clone();
+    target.background_video = from.background_video.clone();
+    target.background_dim = from.background_dim;
+    target.component_gap = from.component_gap;
+    target.panels = from.panels;
+    target.liquid = from.liquid;
+}
+
+/// Removes a preset. True when a file was deleted.
+pub fn delete_layout_in(dir: &Path, name: &str) -> bool {
+    let path = layout_file(dir, name);
+    path.is_file() && std::fs::remove_file(&path).is_ok()
+}
+
+/// Snapshots the current config as a named preset next to the main config.
+pub fn save_layout(name: &str, config: &Config) -> Result<(), String> {
+    let dir = layout_dir().ok_or_else(|| "The layouts folder is unavailable.".to_string())?;
+    save_layout_as(&dir, name, config)
+}
+
+/// Preset names saved by this user, alphabetical.
+pub fn list_layouts() -> Vec<String> {
+    layout_dir().map(|dir| list_layouts_in(&dir)).unwrap_or_default()
+}
+
+/// Loads a saved preset's UI configuration.
+pub fn load_layout(name: &str) -> Option<UiConfig> {
+    let dir = layout_dir()?;
+    load_layout_from(&dir, name)
+}
+
+/// Deletes a saved preset. True when a file was removed.
+pub fn delete_layout(name: &str) -> bool {
+    layout_dir().map(|dir| delete_layout_in(&dir, name)).unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -1182,6 +1495,7 @@ mod tests {
         original.ui.liquid.targets.top_bar = true;
         original.ui.liquid.targets.setup = true;
         original.ui.liquid.dark_tone.lift = 0.125;
+        original.ui.spatial_enabled = false;
         save_to(&path, &original);
 
         let loaded = load_from(&path).expect("config should load");
@@ -1215,6 +1529,51 @@ mod tests {
         assert_eq!(loaded.ui.liquid.dark_tone.lift, 0.125);
         assert!(loaded.ui.liquid.targets.transport);
         assert!(!loaded.ui.liquid.targets.settings_controls);
+        assert!(!loaded.ui.spatial_enabled);
+    }
+
+    #[test]
+    fn spatial_is_only_active_while_the_panel_is_on_screen() {
+        let mut ui = UiConfig::default();
+        assert!(!ui.spatial_active(), "spatial audio starts off by default");
+
+        ui.spatial_enabled = true;
+        assert!(!ui.spatial_active(), "the renderer stays off while hidden");
+
+        ui.panels[SPATIAL_PANEL].visible = true;
+        assert!(ui.spatial_active(), "showing the panel turns the renderer on");
+
+        ui.spatial_enabled = false;
+        assert!(!ui.spatial_active(), "the ON/OFF chip wins over visibility");
+
+        ui.spatial_enabled = true;
+        ui.panels[SPATIAL_PANEL].visible = false;
+        assert!(!ui.spatial_active(), "hiding the panel turns the renderer off");
+    }
+
+    #[test]
+    fn equalizer_is_only_active_while_the_panel_is_on_screen() {
+        let mut ui = UiConfig::default();
+        assert!(!ui.eq_active(), "the equalizer starts off by default");
+
+        ui.eq_enabled = true;
+        assert!(
+            !ui.eq_active(),
+            "the equalizer stays off while the panel is hidden"
+        );
+
+        ui.panels[EQUALIZER_PANEL].visible = true;
+        assert!(ui.eq_active(), "showing the panel turns the equalizer on");
+
+        ui.eq_enabled = false;
+        assert!(!ui.eq_active(), "the ON/OFF chip wins over visibility");
+
+        ui.eq_enabled = true;
+        ui.panels[EQUALIZER_PANEL].visible = false;
+        assert!(
+            !ui.eq_active(),
+            "hiding the panel turns the equalizer off"
+        );
     }
 
     #[test]
@@ -1224,11 +1583,11 @@ mod tests {
         assert!(targets.player_chips);
         assert!(targets.downloader_actions);
         assert!(targets.menus);
-        assert!(targets.lists);
         assert!(targets.sliders);
         assert!(targets.panels);
         assert!(!targets.top_bar);
         assert!(!targets.option_chips);
+        assert!(!targets.lists);
         assert!(!targets.settings_controls);
         assert!(!targets.setup);
     }
@@ -1284,5 +1643,44 @@ mod tests {
         assert_eq!(loaded.quality, DEFAULT_QUALITY);
         assert_eq!(loaded.parallel, DEFAULT_PARALLEL);
         assert_eq!(loaded.ui, UiConfig::default());
+    }
+
+    #[test]
+    fn layout_presets_round_trip() {
+        let dir = std::env::temp_dir().join("defplayer_layout_presets");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut config = Config {
+            library_root: PathBuf::from(r"D:\Music"),
+            quality: 192,
+            parallel: 3,
+            ui: UiConfig::default(),
+        };
+        config.ui.accent_a = [9, 200, 120];
+        config.ui.panels[1].x = 0.42;
+        config.ui.component_gap = 24.0;
+        config.ui.liquid.enabled = !config.ui.liquid.enabled;
+
+        save_layout_as(&dir, "Night Drive", &config).expect("preset saves");
+        save_layout_as(&dir, "Day Light", &config).expect("preset saves");
+        assert_eq!(
+            list_layouts_in(&dir),
+            vec!["Day Light".to_string(), "Night Drive".to_string()]
+        );
+
+        let preset = load_layout_from(&dir, "Night Drive").expect("preset loads");
+        let mut target = UiConfig::default();
+        apply_layout(&mut target, &preset);
+        assert_eq!(target.accent_a, [9, 200, 120]);
+        assert_eq!(target.panels[1].x, 0.42);
+        assert_eq!(target.component_gap, 24.0);
+        assert_eq!(target.liquid.enabled, config.ui.liquid.enabled);
+        // Playback state is never carried by a preset.
+        assert_eq!(target.volume, UiConfig::default().volume);
+
+        assert!(delete_layout_in(&dir, "Day Light"));
+        assert_eq!(list_layouts_in(&dir), vec!["Night Drive".to_string()]);
+        assert!(!delete_layout_in(&dir, "gone"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

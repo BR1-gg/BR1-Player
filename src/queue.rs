@@ -32,6 +32,8 @@ pub struct Job {
     pub detail: String,
     pub error: Option<String>,
     pub queue_index: usize,
+    /// 1-based position on the resolved YouTube playlist page; 0 = unknown.
+    position: u64,
     resolve: bool,
     subfolder: Option<String>,
 }
@@ -60,7 +62,7 @@ enum Event {
         id: u64,
         playlist: Option<String>,
         covers: Vec<String>,
-        items: Vec<(String, String)>,
+        items: Vec<(String, String, u64)>,
     },
     Finished {
         id: u64,
@@ -144,6 +146,7 @@ impl Manager {
             },
             error: None,
             queue_index,
+            position: 0,
             resolve,
             subfolder: None,
         });
@@ -272,7 +275,7 @@ impl Manager {
 
                 let mut children = Vec::new();
                 if !items.is_empty() {
-                    for (url, title) in items {
+                    for (url, title, position) in items {
                         let child_id = self.next_id;
                         self.next_id += 1;
                         children.push(Job {
@@ -285,6 +288,7 @@ impl Manager {
                             detail: "Queued".to_string(),
                             error: None,
                             queue_index: 0,
+                            position,
                             resolve: false,
                             subfolder: subfolder.clone(),
                         });
@@ -420,6 +424,7 @@ impl Manager {
         let sender = self.sender.clone();
         let source = job.source;
         let resolve = job.resolve;
+        let position = job.position;
 
         if let Some(job) = self.jobs.iter_mut().find(|job| job.id == id) {
             job.state = JobState::Running;
@@ -431,18 +436,29 @@ impl Manager {
         }
 
         let pid = handle.pid;
-        thread::spawn(move || run_job(id, handle, source, resolve, sender));
+        thread::spawn(move || run_job(id, handle, source, resolve, position, sender));
         Ok(RunningJob { id, cancel, pid })
     }
 }
 
-fn run_job(id: u64, handle: Handle, source: Source, resolve: bool, sender: Sender<Event>) {
-    let mut entries: Vec<(String, String)> = Vec::new();
+fn run_job(
+    id: u64,
+    handle: Handle,
+    source: Source,
+    resolve: bool,
+    position: u64,
+    sender: Sender<Event>,
+) {
+    let mut entries: Vec<(String, String, u64)> = Vec::new();
     let mut playlist: Option<String> = None;
     let mut cover_urls: Vec<String> = Vec::new();
     let mut total_songs: Option<usize> = None;
     let mut done_songs: usize = 0;
     let mut last_error: Option<String> = None;
+    // Filled in while a yt-dlp track download runs, then used to stamp the
+    // file with the real upload date (or the playlist position as fallback).
+    let mut destination: Option<PathBuf> = None;
+    let mut upload_stamp: Option<u64> = None;
 
     while let Ok(message) = handle.receiver.recv() {
         match message {
@@ -452,11 +468,12 @@ fn run_job(id: u64, handle: Handle, source: Source, resolve: bool, sender: Sende
                         cover_urls.push(url);
                         continue;
                     }
-                    if let Some((name, url, title)) = download::parse_resolve_line(&line) {
+                    if let Some((name, url, title, position)) = download::parse_resolve_line(&line)
+                    {
                         if playlist.is_none() {
                             playlist = Some(name);
                         }
-                        entries.push((url, title));
+                        entries.push((url, title, position));
                         let _ = sender.send(Event::Progress {
                             id,
                             fraction: None,
@@ -475,6 +492,17 @@ fn run_job(id: u64, handle: Handle, source: Source, resolve: bool, sender: Sende
 
                 if let Some(title) = title_from_line(&line) {
                     let _ = sender.send(Event::Title { id, title });
+                }
+
+                if source != Source::Spotify {
+                    // yt-dlp reports the final file and the real upload date
+                    // while it works, no extra requests involved.
+                    if let Some(path) = download::destination_from_line(&line) {
+                        destination = Some(path);
+                    }
+                    if let Some(stamp) = download::upload_date_from_line(&line) {
+                        upload_stamp = Some(stamp);
+                    }
                 }
 
                 if let Some(total) = download::parse_found_songs(&line) {
@@ -546,6 +574,33 @@ fn run_job(id: u64, handle: Handle, source: Source, resolve: bool, sender: Sende
                     } else {
                         None
                     };
+
+                    // Carry the YouTube upload date (or the playlist position
+                    // as fallback) on the file's date, so the newest-first
+                    // sort reproduces the YouTube playlist order.
+                    if !cancelled && code == Some(0) {
+                        if let Some(path) = &destination {
+                            let stamp = upload_stamp.or_else(|| {
+                                (position > 0).then(|| {
+                                    std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|duration| duration.as_secs())
+                                        .unwrap_or(0)
+                                        .saturating_sub(position * 3600)
+                                })
+                            });
+                            if let Some(secs) = stamp {
+                                if download::set_file_time(path, secs) {
+                                    let _ = sender.send(Event::Progress {
+                                        id,
+                                        fraction: None,
+                                        detail: "Saved with its YouTube date".to_string(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+
                     let _ = sender.send(Event::Finished {
                         id,
                         code,

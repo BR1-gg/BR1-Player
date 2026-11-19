@@ -57,6 +57,19 @@ pub fn tools_dir() -> Option<PathBuf> {
         if let Some(dir) = exe.parent() {
             candidates.push(dir.join("bin"));
             candidates.push(dir.to_path_buf());
+            // Walk up a few levels so running the exe from `target\release`
+            // (or any nested folder) still finds the project's `bin`. The
+            // video background depends on ffmpeg being discoverable here.
+            let mut ancestor = dir.to_path_buf();
+            for _ in 0..4 {
+                match ancestor.parent() {
+                    Some(parent) => {
+                        ancestor = parent.to_path_buf();
+                        candidates.push(ancestor.join("bin"));
+                    }
+                    None => break,
+                }
+            }
         }
     }
     if let Ok(cwd) = std::env::current_dir() {
@@ -142,16 +155,75 @@ pub fn parse_percent(line: &str) -> Option<(f32, String)> {
     Some((value / 100.0, detail))
 }
 
-pub fn parse_resolve_line(line: &str) -> Option<(String, String, String)> {
-    let mut parts = line.splitn(3, '|');
+pub fn parse_resolve_line(line: &str) -> Option<(String, String, String, u64)> {
+    let mut parts = line.splitn(4, '|');
     let playlist = parts.next()?.trim().to_string();
     let url = parts.next()?.trim().to_string();
     let title = parts.next().unwrap_or_default().trim().to_string();
+    // 1-based position on the YouTube playlist page; 0 when not available.
+    let position = parts
+        .next()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(0);
 
     if url.is_empty() || url == "NA" {
         return None;
     }
-    Some((playlist, url, title))
+    Some((playlist, url, title, position))
+}
+
+/// The final file path out of yt-dlp's destination lines. The extract-audio
+/// line arrives last, so it leaves the converted MP3's path.
+pub fn destination_from_line(line: &str) -> Option<PathBuf> {
+    for prefix in ["[download] Destination: ", "[ExtractAudio] Destination: "] {
+        if let Some(path) = line.strip_prefix(prefix) {
+            let path = path.trim();
+            if path.is_empty() {
+                return None;
+            }
+            return Some(PathBuf::from(path));
+        }
+    }
+    None
+}
+
+/// `YYYYMMDD` from yt-dlp's `--print after_move:%(upload_date)s` output,
+/// converted to unix seconds (midday UTC).
+pub fn upload_date_from_line(line: &str) -> Option<u64> {
+    let date = line.trim();
+    if date.len() != 8 || !date.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let year: i64 = date[0..4].parse().ok()?;
+    let month: i64 = date[4..6].parse().ok()?;
+    let day: i64 = date[6..8].parse().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+
+    // Days since the unix epoch, from Howard Hinnant's civil-from-days.
+    let years = if month <= 2 { year - 1 } else { year };
+    let era = if years >= 0 { years } else { years - 399 } / 400;
+    let year_of_era = years - era * 400;
+    let month_index = (month + 9) % 12;
+    let day_of_year = (153 * month_index + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+
+    Some((days.max(0) as u64) * 86_400 + 43_200)
+}
+
+/// Sets a file's modification stamp, used to carry the real upload date so
+/// the newest-first sort mirrors the YouTube playlist order.
+pub fn set_file_time(path: &Path, unix_secs: u64) -> bool {
+    use std::fs::OpenOptions;
+
+    let stamp =
+        std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(unix_secs.max(1));
+    match OpenOptions::new().write(true).open(path) {
+        Ok(file) => file.set_modified(stamp).is_ok(),
+        Err(_) => false,
+    }
 }
 
 pub fn parse_found_songs(line: &str) -> Option<usize> {
@@ -176,7 +248,8 @@ pub fn yt_dlp_resolve(url: &str) -> Result<Handle, String> {
         "--ignore-errors".to_string(),
         "--no-warnings".to_string(),
         "--print".to_string(),
-        "%(playlist_title)s|%(url)s|%(title)s".to_string(),
+        // playlist title | video url | video title | 1-based playlist position.
+        "%(playlist_title)s|%(url)s|%(title)s|%(playlist_index)s".to_string(),
     ];
 
     // Largest playlist artwork first; YouTube only signs some of the sizes,
@@ -224,6 +297,12 @@ pub fn yt_dlp_track(
         "ThumbnailsConvertor+ffmpeg_o:-vf scale=640:640:force_original_aspect_ratio=decrease -q:v 6"
             .to_string(),
         "--add-metadata".to_string(),
+        // Print the real YouTube upload date once the MP3 is in place; the
+        // queue reads it to stamp the file. `--print` implies quiet mode, so
+        // --no-quiet brings the progress lines back.
+        "--print".to_string(),
+        "after_move:%(upload_date)s".to_string(),
+        "--no-quiet".to_string(),
         "--windows-filenames".to_string(),
         "--ffmpeg-location".to_string(),
         dir.display().to_string(),
@@ -637,15 +716,44 @@ mod tests {
 
     #[test]
     fn reads_resolve_lines() {
-        let (playlist, url, title) = parse_resolve_line(
-            "Popular Music Videos|https://www.youtube.com/watch?v=fOT0BUpITw8|BELLAKEO",
+        let (playlist, url, title, position) = parse_resolve_line(
+            "Popular Music Videos|https://www.youtube.com/watch?v=fOT0BUpITw8|BELLAKEO|3",
         )
         .unwrap();
         assert_eq!(playlist, "Popular Music Videos");
         assert_eq!(url, "https://www.youtube.com/watch?v=fOT0BUpITw8");
         assert_eq!(title, "BELLAKEO");
+        assert_eq!(position, 3);
+
+        // Old-format lines without a position still resolve, as index 0.
+        let (playlist, _, _, position) =
+            parse_resolve_line("Mix|https://www.youtube.com/watch?v=abc|Song").unwrap();
+        assert_eq!(playlist, "Mix");
+        assert_eq!(position, 0);
 
         assert!(parse_resolve_line("NA|NA|NA").is_none());
+    }
+
+    #[test]
+    fn reads_upload_dates_and_destinations() {
+        // 2024-01-15 midday UTC.
+        assert_eq!(upload_date_from_line("20240115"), Some(1_705_320_000));
+        assert_eq!(upload_date_from_line(" 19700101 "), Some(43_200));
+        // Not a bare date line: ignored.
+        assert_eq!(upload_date_from_line("NA"), None);
+        assert_eq!(upload_date_from_line("2024011"), None);
+        assert_eq!(upload_date_from_line("20241399"), None);
+        assert_eq!(upload_date_from_line("[download] 100%"), None);
+
+        assert_eq!(
+            destination_from_line("[ExtractAudio] Destination: C:\\Music\\Song.mp3"),
+            Some(PathBuf::from("C:\\Music\\Song.mp3"))
+        );
+        assert_eq!(
+            destination_from_line("[download] Destination: C:\\Music\\Song.webm"),
+            Some(PathBuf::from("C:\\Music\\Song.webm"))
+        );
+        assert_eq!(destination_from_line("Deleting original file"), None);
     }
 
     #[test]

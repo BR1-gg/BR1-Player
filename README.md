@@ -25,7 +25,9 @@ It is a portable Windows app with no account, no cloud library and no installer.
   above and below sound like different directions, not just left/right volume.
   Move the sound around, set its distance and height, turn the listener's head,
   choose built-in or measured head-related profiles, compare with normal stereo
-  panning, and use the built-in listening tests.
+  panning, and use the built-in listening tests. The ON/OFF chip in its header
+  switches the whole renderer; while it is off — or while the component is not on
+  the dashboard — playback stays untouched stereo.
 - **Make it yours** — eight theme presets, a custom gradient and frame, your own
   photo or looping video background, optional Liquid Glass surfaces, and
   draggable/resizable dashboard panels. Add, remove and arrange the components
