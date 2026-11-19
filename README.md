@@ -49,13 +49,13 @@ It is a portable Windows app with no account, no cloud library and no installer.
 
 ![Ocean visualizer and equalizer](screenshots/03-ocean-visualizer.png)
 
-### Royal — main dashboard
+### Royal — main dashboard with Liquid Glass
 
-![Royal dashboard](screenshots/04-royal-dashboard.png)
+![Royal dashboard with Liquid Glass](screenshots/04-royal-dashboard.png)
 
-### Neon — main dashboard
+### Neon — every component with Liquid Glass
 
-![Neon dashboard](screenshots/05-neon-dashboard.png)
+![Neon dashboard with Liquid Glass](screenshots/05-neon-dashboard.png)
 
 ### Neon — appearance settings
 
