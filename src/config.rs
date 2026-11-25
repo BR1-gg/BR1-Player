@@ -596,6 +596,12 @@ pub struct Config {
     pub quality: u16,
     /// How many downloads may run at the same time.
     pub parallel: usize,
+    /// Playlist folder new downloads are routed into; `None` = the music
+    /// root ("All music"). Nested playlists keep their " / " display name.
+    pub download_target: Option<String>,
+    /// Update mode: songs already in the destination playlist are skipped
+    /// instead of downloaded again.
+    pub download_skip_existing: bool,
     pub ui: UiConfig,
 }
 
@@ -605,6 +611,8 @@ impl Config {
             library_root,
             quality: DEFAULT_QUALITY,
             parallel: DEFAULT_PARALLEL,
+            download_target: None,
+            download_skip_existing: true,
             ui: UiConfig::default(),
         }
     }
@@ -716,6 +724,8 @@ pub fn load_from(path: &Path) -> Option<Config> {
     let mut root = None;
     let mut quality = DEFAULT_QUALITY;
     let mut parallel = DEFAULT_PARALLEL;
+    let mut download_target = None;
+    let mut download_skip_existing = true;
     let mut ui = UiConfig::default();
     let mut has_hrtf_settings = false;
 
@@ -744,6 +754,14 @@ pub fn load_from(path: &Path) -> Option<Config> {
                     }
                 }
             }
+            // Stored value is already a folder name (or folder path for
+            // nested playlists); empty means "All music".
+            "download_target" => {
+                if !value.is_empty() {
+                    download_target = Some(value.to_string());
+                }
+            }
+            "download_skip_existing" => download_skip_existing = parse_bool(value),
             "ui_accent_a" => {
                 if let Some(color) = parse_color(value) {
                     ui.accent_a = color;
@@ -1006,6 +1024,8 @@ pub fn load_from(path: &Path) -> Option<Config> {
             library_root,
             quality,
             parallel,
+            download_target,
+            download_skip_existing,
             ui,
         }),
         None => {
@@ -1020,7 +1040,7 @@ pub fn save_to(path: &Path, config: &Config) {
         let _ = std::fs::create_dir_all(parent);
     }    let ui = &config.ui;
     let mut text = format!(
-        "library_root={}\nquality={}\nparallel={}\n\
+        "library_root={}\nquality={}\nparallel={}\ndownload_target={}\ndownload_skip_existing={}\n\
          ui_accent_a=#{:02X}{:02X}{:02X}\n\
          ui_accent_b=#{:02X}{:02X}{:02X}\n\
          ui_angle={:.1}\n\
@@ -1054,6 +1074,11 @@ pub fn save_to(path: &Path, config: &Config) {
         config.library_root.display(),
         config.quality,
         config.parallel,
+        config
+            .download_target
+            .as_deref()
+            .unwrap_or_default(),
+        if config.download_skip_existing { 1 } else { 0 },
         ui.accent_a[0],
         ui.accent_a[1],
         ui.accent_a[2],
@@ -1156,7 +1181,7 @@ fn backup_path(path: &Path) -> PathBuf {
 /// Appends one diagnostic line to `save.log` next to the config so load and
 /// save problems can be traced after the fact. Successful saves are visible
 /// from the config's own timestamp and are not logged, keeping this tiny.
-fn audit(message: &str) {
+pub fn audit(message: &str) {
     use std::io::Write as _;
     let Some(config) = config_path() else {
         return;
@@ -1464,6 +1489,8 @@ mod tests {
             library_root: PathBuf::from(r"D:\Music Library"),
             quality: 320,
             parallel: 6,
+            download_target: Some("Road Trip".to_string()),
+            download_skip_existing: false,
             ui: UiConfig::default(),
         };
         original.ui.accent_a = [255, 122, 89];
@@ -1502,6 +1529,8 @@ mod tests {
         assert_eq!(loaded.library_root, original.library_root);
         assert_eq!(loaded.quality, 320);
         assert_eq!(loaded.parallel, 6);
+        assert_eq!(loaded.download_target, Some("Road Trip".to_string()));
+        assert!(!loaded.download_skip_existing);
         assert_eq!(loaded.ui.accent_a, [255, 122, 89]);
         assert_eq!(loaded.ui.accent_b, [177, 75, 255]);
         assert_eq!(loaded.ui.panels[1], original.ui.panels[1]);
@@ -1654,6 +1683,8 @@ mod tests {
             library_root: PathBuf::from(r"D:\Music"),
             quality: 192,
             parallel: 3,
+            download_target: None,
+            download_skip_existing: true,
             ui: UiConfig::default(),
         };
         config.ui.accent_a = [9, 200, 120];

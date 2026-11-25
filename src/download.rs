@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -94,6 +95,53 @@ fn tool(dir: &Path, name: &str) -> Result<PathBuf, String> {
     }
 }
 
+/// Writable folder the bundled one-file tools unpack themselves into.
+///
+/// yt-dlp and spotdl are PyInstaller executables: every run extracts a few
+/// dozen MB to `%TEMP%` first. When the system temp folder is blocked —
+/// permissions, antivirus, or a restricted launch — they die with
+/// "Could not create temporary directory!" before doing any work. Pointing
+/// them at a folder the player owns makes downloads independent of that.
+pub fn tool_temp_dir() -> Option<PathBuf> {
+    static CACHE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let mut candidates = Vec::new();
+            if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+                candidates.push(PathBuf::from(local).join("DefPlayer").join("tmp"));
+            }
+            candidates.push(std::env::temp_dir().join("br1-player-temp"));
+            if let Some(dir) = tools_dir() {
+                candidates.push(dir.join("tmp"));
+            }
+            if let Ok(cwd) = std::env::current_dir() {
+                candidates.push(cwd.join(".br1-temp"));
+            }
+
+            for dir in candidates {
+                if std::fs::create_dir_all(&dir).is_err() {
+                    continue;
+                }
+                // Prove it is really writable before trusting it.
+                let probe = dir.join("probe.tmp");
+                if std::fs::write(&probe, b"ok").is_err() {
+                    continue;
+                }
+                let _ = std::fs::remove_file(&probe);
+                return Some(dir);
+            }
+            None
+        })
+        .clone()
+}
+
+/// Points a spawned tool at the player's own temp folder when one is usable.
+fn apply_tool_temp(command: &mut Command) {
+    if let Some(temp) = tool_temp_dir() {
+        command.env("TEMP", &temp).env("TMP", &temp);
+    }
+}
+
 pub enum Message {
     Line(String),
     Finished { code: Option<i32>, cancelled: bool },
@@ -132,6 +180,58 @@ pub fn sanitize_folder(name: &str) -> String {
         cleaned = "Playlist".to_string();
     }
     cleaned
+}
+
+/// Filename stem yt-dlp would produce for `title` with `--windows-filenames`,
+/// lowercased so two stems can be compared case-insensitively. Used to
+/// recognise songs that are already in a playlist folder.
+pub fn title_stem(title: &str) -> String {
+    let cleaned: String = title
+        .chars()
+        .map(|ch| {
+            if matches!(ch, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+                || (ch as u32) < 32
+            {
+                '_'
+            } else {
+                ch
+            }
+        })
+        .collect();
+
+    cleaned
+        .trim()
+        .trim_end_matches(['.', ' '])
+        .to_lowercase()
+}
+
+/// Lowercased stems of the audio files directly inside `folder`.
+pub fn folder_stems(folder: &Path) -> HashSet<String> {
+    let mut stems = HashSet::new();
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return stems;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !crate::library::is_audio(&path) {
+            continue;
+        }
+        if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+            stems.insert(stem.to_lowercase());
+        }
+    }
+    stems
+}
+
+/// Letters and digits only, lowercased. A looser comparison used on top of
+/// the exact stem match, so `Song (official)` and `Song - official` still
+/// count as the same track.
+pub fn normalize_stem(stem: &str) -> String {
+    stem.chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_lowercase()
 }
 
 /// Reads the percentage out of `[download]  45.2% of 3.7MiB at 2.5MiB/s ETA 00:05`.
@@ -273,8 +373,10 @@ pub fn yt_dlp_track(
     let dir = tools_dir().ok_or_else(missing_tools)?;
     let program = tool(&dir, "yt-dlp.exe")?;
 
+    // `subfolder` is a relative path under the music root, already
+    // sanitized by the caller (single name or `A\B` for nested playlists).
     let template = match subfolder {
-        Some(name) => format!("{}/%(title)s.%(ext)s", sanitize_folder(name)),
+        Some(name) => format!("{}/%(title)s.%(ext)s", name),
         None => "%(title)s.%(ext)s".to_string(),
     };
 
@@ -316,22 +418,27 @@ pub fn yt_dlp_track(
     spawn(program, args, Some(dir), Some(root.to_path_buf()))
 }
 
+/// `grouped` keeps the current behaviour for Spotify lists (one folder per
+/// list). `subfolder` overrides it: every song lands in that folder instead —
+/// used when the downloader panel targets an existing playlist.
 pub fn spotdl(
     url: &str,
     root: &Path,
     quality: u16,
     threads: usize,
     grouped: bool,
+    subfolder: Option<&str>,
 ) -> Result<Handle, String> {
     let dir = tools_dir().ok_or_else(missing_tools)?;
     let program = tool(&dir, "spotdl.exe")?;
     let ffmpeg = tool(&dir, "ffmpeg.exe")?;
 
-    let output = if grouped {
-        root.join("{list-name}")
-            .join("{artist} - {title}.{output-ext}")
-    } else {
-        root.join("{artist} - {title}.{output-ext}")
+    let output = match subfolder {
+        Some(name) => root.join(name).join("{artist} - {title}.{output-ext}"),
+        None if grouped => root
+            .join("{list-name}")
+            .join("{artist} - {title}.{output-ext}"),
+        None => root.join("{artist} - {title}.{output-ext}"),
     };
 
     let args = vec![
@@ -356,10 +463,8 @@ pub fn spotdl(
 }
 
 /// Downloads the playlist's own artwork (a signed thumbnail URL) and stores it
-/// resized as `<root>/<subfolder>/cover.jpg`. Blocking — call it from a thread.
-/// Downloads the playlist's own artwork and stores it as
-/// `<root>/<subfolder>/cover.jpg`. `urls` are tried from best to worst because
-/// YouTube only signs some of the sizes. Blocking — call it from a thread.
+/// resized as `<root>/<subfolder>/cover.jpg`. `subfolder` is a relative path,
+/// already sanitized by the caller. Blocking — call it from a thread.
 pub fn download_playlist_cover(
     urls: &[String],
     root: &Path,
@@ -369,7 +474,7 @@ pub fn download_playlist_cover(
     let yt_dlp = tool(&dir, "yt-dlp.exe")?;
     let ffmpeg = tool(&dir, "ffmpeg.exe")?;
 
-    let folder = root.join(sanitize_folder(subfolder));
+    let folder = root.join(subfolder);
     std::fs::create_dir_all(&folder).map_err(|err| format!("Cannot create folder: {err}"))?;
 
     let mut source = None;
@@ -383,6 +488,7 @@ pub fn download_playlist_cover(
 
     let temporary = folder.join("cover.tmp.jpg");
     let mut ffmpeg_cmd = Command::new(&ffmpeg);
+    apply_tool_temp(&mut ffmpeg_cmd);
     let source_arg = source.display().to_string();
     let target_arg = temporary.display().to_string();
     ffmpeg_cmd
@@ -428,6 +534,7 @@ fn fetch_image(yt_dlp: &Path, folder: &Path, url: &str) -> Option<std::path::Pat
     let template_arg = template.display().to_string();
 
     let mut command = Command::new(yt_dlp);
+    apply_tool_temp(&mut command);
     command
         .args(["--no-warnings", "-o", &template_arg, url])
         .stdin(Stdio::null())
@@ -462,7 +569,7 @@ pub fn yt_dlp_playlist_cover(url: &str, root: &Path, subfolder: &str) -> Result<
     let dir = tools_dir().ok_or_else(missing_tools)?;
     let program = tool(&dir, "yt-dlp.exe")?;
 
-    let template = format!("{}/cover.%(ext)s", sanitize_folder(subfolder));
+    let template = format!("{}/cover.%(ext)s", subfolder);
     let args = vec![
         "--skip-download".to_string(),
         "--no-warnings".to_string(),
@@ -520,6 +627,8 @@ fn spawn(
             command.env("PATH", joined);
         }
     }
+
+    apply_tool_temp(&mut command);
 
     #[cfg(windows)]
     {
@@ -761,5 +870,45 @@ mod tests {
         assert_eq!(sanitize_folder("AC/DC: Live?"), "AC_DC_ Live_");
         assert_eq!(sanitize_folder("  mixed \\ hits | "), "mixed _ hits _");
         assert_eq!(sanitize_folder(""), "Playlist");
+    }
+
+    #[test]
+    fn title_stems_mirror_yt_dlp_windows_names() {
+        // yt-dlp --windows-filenames swaps forbidden characters for "_".
+        assert_eq!(title_stem("AC/DC: Live?"), "ac_dc_ live_");
+        assert_eq!(title_stem("  Trailing dots... "), "trailing dots");
+        assert_eq!(title_stem("Plain Title"), "plain title");
+    }
+
+    #[test]
+    fn folder_stems_list_audio_files_only() {
+        let dir = std::env::temp_dir().join("br1-player-stem-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Some Song.mp3"), b"x").unwrap();
+        std::fs::write(dir.join("Other.flac"), b"x").unwrap();
+        std::fs::write(dir.join("notes.txt"), b"x").unwrap();
+
+        let stems = folder_stems(&dir);
+        assert!(stems.contains("some song"));
+        assert!(stems.contains("other"));
+        assert!(!stems.contains("notes"));
+    }
+
+    #[test]
+    fn normalized_stems_ignore_punctuation_and_case() {
+        assert_eq!(normalize_stem("AC_DC_ Live?"), normalize_stem("acdc live"));
+        assert_ne!(normalize_stem("song one"), normalize_stem("song two"));
+    }
+
+    #[test]
+    fn the_download_tools_get_a_writable_temp_folder() {
+        let temp = tool_temp_dir().expect("some writable temp folder should be found");
+        // The probe must have been cleaned up and the folder must accept
+        // writes from us — that is what PyInstaller needs.
+        assert!(!temp.join("probe.tmp").exists());
+        let file = temp.join("br1-temp-test.tmp");
+        std::fs::write(&file, b"ok").expect("the temp folder should be writable");
+        std::fs::remove_file(&file).unwrap();
     }
 }

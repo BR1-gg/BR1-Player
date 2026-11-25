@@ -170,6 +170,10 @@ pub struct PlayerApp {
     shuffle: bool,
     repeat: Repeat,
     audio: Option<AudioEngine>,
+    /// True when a seek handle was dragged during the frame being built. The
+    /// output stays muted until one full frame passes without a drag, so a
+    /// seek in progress is never audible.
+    seek_drag_seen: bool,
     thumbs: Vec<Option<TextureHandle>>,
     hero_tex: Option<(usize, TextureHandle)>,
     scan_rx: Option<Receiver<Vec<Track>>>,
@@ -188,6 +192,39 @@ pub struct PlayerApp {
     manager: queue::Manager,
     download_status: Option<String>,
     download_failed: bool,
+    /// Playlist folder new downloads land in; `None` = All music (root).
+    download_target: Option<String>,
+    download_target_menu_open: bool,
+    download_target_menu_pos: egui::Pos2,
+    download_target_menu_rect: Rect,
+    download_target_menu_ignore_click: bool,
+    /// Inline "new playlist" input of the downloader panel.
+    download_new_open: bool,
+    download_new_playlist: String,
+    download_new_focus: bool,
+    /// Update mode: songs already in the target folder are not downloaded again.
+    download_skip_existing: bool,
+    /// Right-click menu of one song in the current playlist.
+    track_menu_open: bool,
+    track_menu_pos: egui::Pos2,
+    track_menu_rect: Rect,
+    track_menu_ignore_click: bool,
+    track_menu_index: Option<usize>,
+    /// "New playlist" input inside the song menu.
+    track_menu_new_open: bool,
+    track_menu_new_name: String,
+    track_menu_new_focus: bool,
+    /// Playlist rows of the open song menu with their rects — like
+    /// `plus_rect`, recorded so tests can click them precisely.
+    track_menu_row_rects: Vec<(String, Rect)>,
+    /// True while a scan should replace the whole track list (after file
+    /// moves) instead of merging new files into it.
+    scan_replace: bool,
+    /// Old and new path of the last moved file, used to keep the currently
+    /// playing song selected across a replacing rescan.
+    scan_move: Option<(PathBuf, PathBuf)>,
+    /// Status message to show once a replacing rescan finishes.
+    scan_notice: Option<String>,
 
     config: Config,
     theme: Theme,
@@ -306,6 +343,7 @@ impl PlayerApp {
             shuffle: false,
             repeat: Repeat::Off,
             audio,
+            seek_drag_seen: false,
             thumbs: Vec::new(),
             hero_tex: None,
             scan_rx: None,
@@ -324,6 +362,27 @@ impl PlayerApp {
             manager,
             download_status: None,
             download_failed: false,
+            download_target: config.download_target.clone(),
+            download_target_menu_open: false,
+            download_target_menu_pos: egui::Pos2::ZERO,
+            download_target_menu_rect: Rect::NOTHING,
+            download_target_menu_ignore_click: false,
+            download_new_open: false,
+            download_new_playlist: String::new(),
+            download_new_focus: false,
+            download_skip_existing: config.download_skip_existing,
+            track_menu_open: false,
+            track_menu_pos: egui::Pos2::ZERO,
+            track_menu_rect: Rect::NOTHING,
+            track_menu_ignore_click: false,
+            track_menu_index: None,
+            track_menu_new_open: false,
+            track_menu_new_name: String::new(),
+            track_menu_new_focus: false,
+            track_menu_row_rects: Vec::new(),
+            scan_replace: false,
+            scan_move: None,
+            scan_notice: None,
             config,
             theme,
             add_menu_open: false,
@@ -365,6 +424,15 @@ impl PlayerApp {
             if let Some(url) = app.pending_url.take() {
                 app.download_url = url;
                 app.start_download();
+            }
+
+            // A launch from a restricted shell shows up as "cannot write to
+            // the music folder" much later; say it right away instead. The
+            // downloader panel shows it, so a scan notice cannot hide it.
+            let root = app.library_root.clone();
+            if let Err(err) = Self::ensure_folder_writable(&root) {
+                app.download_status = Some(err);
+                app.download_failed = true;
             }
         }
 
@@ -542,6 +610,20 @@ impl PlayerApp {
         }
         if let Some(audio) = &self.audio {
             audio.seek(fraction * duration);
+        }
+    }
+
+    /// Silences the music while a seek handle is dragged: seeking plays a
+    /// stuttering burst of every position the handle passes, which is the
+    /// "fast-forward" noise. `update_logic` brings the volume back on the
+    /// first frame without a drag.
+    fn note_seek_drag(&mut self, dragging: bool) {
+        if !dragging {
+            return;
+        }
+        self.seek_drag_seen = true;
+        if let Some(audio) = &mut self.audio {
+            audio.set_seeking(true);
         }
     }
 
@@ -747,31 +829,35 @@ impl PlayerApp {
 
         match receiver.try_recv() {
             Ok(tracks) => {
-                let before = self.tracks.len();
-                for track in tracks {
-                    if !self.tracks.iter().any(|known| known.path == track.path) {
-                        self.tracks.push(track);
-                    }
-                }
-                self.thumbs.resize(self.tracks.len(), None);
-                self.playlist_tex.clear();
-                self.rebuild_visible();
-                let added = self.tracks.len() - before;
-                self.scanning = false;
-                self.scan_rx = None;
-
-                if added == 0 && before == 0 {
-                    self.notice("No audio files found in that folder yet.", false);
+                if self.scan_replace {
+                    self.finish_replace_scan(tracks);
                 } else {
-                    self.notice(
-                        format!("Added {added} track{}", if added == 1 { "" } else { "s" }),
-                        false,
-                    );
-                }
+                    let before = self.tracks.len();
+                    for track in tracks {
+                        if !self.tracks.iter().any(|known| known.path == track.path) {
+                            self.tracks.push(track);
+                        }
+                    }
+                    self.thumbs.resize(self.tracks.len(), None);
+                    self.playlist_tex.clear();
+                    self.rebuild_visible();
+                    let added = self.tracks.len() - before;
+                    self.scanning = false;
+                    self.scan_rx = None;
 
-                if self.autoplay && self.current.is_none() && !self.visible.is_empty() {
-                    self.autoplay = false;
-                    self.play_index(self.visible[0]);
+                    if added == 0 && before == 0 {
+                        self.notice("No audio files found in that folder yet.", false);
+                    } else {
+                        self.notice(
+                            format!("Added {added} track{}", if added == 1 { "" } else { "s" }),
+                            false,
+                        );
+                    }
+
+                    if self.autoplay && self.current.is_none() && !self.visible.is_empty() {
+                        self.autoplay = false;
+                        self.play_index(self.visible[0]);
+                    }
                 }
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
@@ -784,6 +870,160 @@ impl PlayerApp {
         }
     }
 
+    /// Full rescan that replaces the track list instead of merging new files
+    /// into it — used after songs were moved between playlist folders.
+    fn refresh_library(&mut self, notice: Option<String>) {
+        self.scanning = true;
+        self.scan_replace = true;
+        self.scan_notice = notice;
+        let (sender, receiver) = channel();
+        self.scan_rx = Some(receiver);
+        let root = self.library_root.clone();
+
+        std::thread::spawn(move || {
+            let tracks = library::scan(std::slice::from_ref(&root), Some(&root));
+            let _ = sender.send(tracks);
+        });
+    }
+
+    /// Rebuilds the whole library after a replacing rescan, keeping the
+    /// currently playing song selected (its file may have been renamed).
+    fn finish_replace_scan(&mut self, tracks: Vec<Track>) {
+        self.scan_replace = false;
+
+        // Which path should stay "now playing" once the list is rebuilt?
+        let keep = match (&self.current, &self.scan_move) {
+            (Some(index), Some((old, new)))
+                if self
+                    .tracks
+                    .get(*index)
+                    .is_some_and(|track| track.path == *old) =>
+            {
+                Some(new.clone())
+            }
+            (Some(index), _) => self.tracks.get(*index).map(|track| track.path.clone()),
+            _ => None,
+        };
+        self.scan_move = None;
+
+        self.tracks = tracks;
+        self.thumbs = vec![None; self.tracks.len()];
+        self.playlist_tex.clear();
+        self.hero_tex = None;
+        self.current =
+            keep.and_then(|path| self.tracks.iter().position(|track| track.path == path));
+
+        if self.current.is_none() {
+            // The selected file is gone from the library: stop gracefully.
+            if let Some(audio) = &self.audio {
+                audio.pause();
+            }
+            self.paused = true;
+        }
+
+        self.rebuild_visible();
+        self.scanning = false;
+        self.scan_rx = None;
+
+        if let Some(message) = self.scan_notice.take() {
+            self.notice(message, false);
+        }
+    }
+
+    /// Real folder of a playlist display name; nested playlists show as
+    /// "Parent / Child" and map back to a real path here.
+    fn playlist_folder(root: &std::path::Path, name: &str) -> PathBuf {
+        root.join(name.replace(" / ", std::path::MAIN_SEPARATOR_STR))
+    }
+
+    /// Moves a song's file into a playlist folder — `None` sends it back to
+    /// All music (the library root) — then refreshes the library. The play
+    /// count follows the file and playback is not interrupted.
+    fn move_track_to_playlist(&mut self, index: usize, target: Option<&str>) {
+        let Some(track) = self.tracks.get(index) else {
+            return;
+        };
+        let source = track.path.clone();
+        let title = track.title.clone();
+        let root = self.library_root.clone();
+
+        let folder = match target {
+            Some(name) => Self::playlist_folder(&root, name),
+            None => root.clone(),
+        };
+
+        if source.parent() == Some(folder.as_path()) {
+            let label = target.unwrap_or("All music");
+            self.notice(format!("“{title}” is already in {label}."), false);
+            return;
+        }
+
+        let Some(file_name) = source.file_name().map(|name| name.to_os_string()) else {
+            self.notice(format!("“{title}” has no file to move."), true);
+            return;
+        };
+
+        if let Err(err) = std::fs::create_dir_all(&folder) {
+            self.notice(format!("Cannot create that playlist folder: {err}"), true);
+            return;
+        }
+
+        // Never overwrite: a clash becomes "Song (2).mp3", "Song (3).mp3"…
+        let mut destination = folder.join(&file_name);
+        let mut counter = 2;
+        while destination.exists() {
+            if counter > 500 {
+                self.notice(
+                    "That playlist already has too many copies of this song.",
+                    true,
+                );
+                return;
+            }
+            let stem = std::path::Path::new(&file_name)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("Song");
+            let ext = std::path::Path::new(&file_name)
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .unwrap_or("mp3");
+            destination = folder.join(format!("{stem} ({counter}).{ext}"));
+            counter += 1;
+        }
+
+        // Rename first (instant, same drive); fall back to copy + remove
+        // when the file sits on another drive.
+        let moved = std::fs::rename(&source, &destination).or_else(|_| {
+            std::fs::copy(&source, &destination)
+                .map(|_| ())
+                .and_then(|_| std::fs::remove_file(&source))
+        });
+
+        if let Err(err) = moved {
+            let _ = std::fs::remove_file(&destination);
+            self.notice(
+                format!("Could not move “{title}”: {err}. Try again with the song paused."),
+                true,
+            );
+            return;
+        }
+
+        // The play count follows the file to its new path. No save_config
+        // here: the autosave persists it, so moves stay cheap and testable.
+        let old_key = source.to_string_lossy().to_string();
+        let new_key = destination.to_string_lossy().to_string();
+        if let Some(count) = self.config.ui.track_plays.remove(&old_key) {
+            self.config.ui.track_plays.insert(new_key, count);
+        }
+
+        self.scan_move = Some((source, destination));
+        let label = match target {
+            Some(name) => format!("“{name}”"),
+            None => "All music".to_string(),
+        };
+        self.refresh_library(Some(format!("Moved “{title}” to {label}.")));
+    }
+
     /* ---------- downloads ---------- */
 
     fn start_download(&mut self) {
@@ -794,9 +1034,126 @@ impl PlayerApp {
             return;
         }
 
+        // Fail before queueing anything when the destination cannot be
+        // written — that is exactly what a restricted launch looks like.
+        if let Err(err) = Self::ensure_folder_writable(&self.download_destination_folder()) {
+            self.download_status = Some(err);
+            self.download_failed = true;
+            return;
+        }
+
         self.download_status = None;
         self.download_failed = false;
-        self.manager.submit(url);
+        // The target and update mode are captured per job, so changing the
+        // panel selector afterwards never reroutes links already queued.
+        self.manager
+            .submit(url, self.download_target.clone(), self.download_skip_existing);
+    }
+
+    /// Folder new downloads land in: the selected playlist, or the root.
+    fn download_destination_folder(&self) -> PathBuf {
+        self.download_target
+            .as_deref()
+            .map(|name| Self::playlist_folder(&self.library_root, name))
+            .unwrap_or_else(|| self.library_root.clone())
+    }
+
+    /// What the user can do about a blocked save, worded for the real cause.
+    /// A launch from a folder marked "low integrity" (or from a launcher that
+    /// hands the app a restricted token) denies every write, including the
+    /// player's own settings folder — then changing the music folder cannot
+    /// help and must not be suggested.
+    fn save_blocked_hint(settings_writable: bool) -> String {
+        if settings_writable {
+            "Start BR1 Player.exe by double-clicking it instead of launching it from a terminal, \
+             a script or another app; if that does not help, allow BR1 Player in the folder's \
+             Properties → Security and in any antivirus folder protection, or pick another \
+             folder with CHANGE FOLDER."
+                .to_string()
+        } else {
+            "Windows is running the player with restricted write permissions — it cannot even \
+             write its own settings folder — so the music folder is not the problem. Copy \
+             BR1 Player.exe together with the bin folder to a normal folder (for example \
+             D:\\BR1 Player) and start it from there."
+                .to_string()
+        }
+    }
+
+    /// True when the player can write next to its own config. False only for a
+    /// restricted launch, where no folder outside the app's own is writable.
+    fn settings_folder_writable() -> bool {
+        let Some(folder) = config::config_path().and_then(|path| {
+            path.parent().map(|parent| parent.to_path_buf())
+        }) else {
+            return true;
+        };
+        let probe = folder.join(".br1-settings-check");
+        if std::fs::write(&probe, b"ok").is_err() {
+            return false;
+        }
+        let _ = std::fs::remove_file(&probe);
+        true
+    }
+
+    /// Creates `folder` if needed and proves a file can be written there.
+    /// The failure message tells the user what to do about it.
+    ///
+    /// Only the write is evidence: the probe file is deleted afterwards, but a
+    /// refused delete is cleanup noise — antivirus and indexers routinely hold
+    /// a fresh file for a moment and answer "access denied" — so it can never
+    /// turn a writable folder into a permission error. The probe name carries
+    /// the process id so a leftover probe from an earlier run (or a fixed name
+    /// stuck open) cannot block every later download the way one shared name
+    /// would.
+    fn ensure_folder_writable(folder: &std::path::Path) -> Result<(), String> {
+        if let Err(err) = std::fs::create_dir_all(folder) {
+            return Err(format!(
+                "Cannot create {}: {err}. {}",
+                folder.display(),
+                Self::save_blocked_hint(Self::settings_folder_writable())
+            ));
+        }
+
+        // Probes written by older builds used one fixed name; clear it when it
+        // is still around and writable so nobody mistakes it for a real file.
+        let _ = std::fs::remove_file(folder.join(".br1-write-check"));
+
+        let probe = folder.join(format!(".br1-write-check-{}", std::process::id()));
+        let mut last: Option<std::io::Error> = None;
+        for attempt in 0..3u64 {
+            match std::fs::write(&probe, b"ok") {
+                Ok(()) => {
+                    // Cleanup only, best effort: a locked probe is harmless
+                    // because the next run uses a different name.
+                    for _ in 0..5 {
+                        if std::fs::remove_file(&probe).is_ok() {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    return Ok(());
+                }
+                Err(err) => {
+                    // A scanner or a just-disconnected drive can lose a race
+                    // once; retrying keeps a slow moment from blocking the
+                    // download outright.
+                    last = Some(err);
+                    std::thread::sleep(Duration::from_millis(25 * (attempt + 1)));
+                }
+            }
+        }
+
+        let err = last.unwrap_or_else(|| std::io::Error::other("write check failed"));
+        config::audit(&format!(
+            "write check failed for {} ({err:?}, os error {:?})",
+            folder.display(),
+            err.raw_os_error()
+        ));
+        Err(format!(
+            "No permission to save into {} ({err}). {}",
+            folder.display(),
+            Self::save_blocked_hint(Self::settings_folder_writable())
+        ))
     }
 
     fn poll_download(&mut self, ctx: &egui::Context) {
@@ -834,6 +1191,8 @@ impl PlayerApp {
             library_root: self.library_root.clone(),
             quality: self.manager.settings.quality,
             parallel: self.manager.settings.parallel,
+            download_target: self.download_target.clone(),
+            download_skip_existing: self.download_skip_existing,
             ui: self.config.ui.clone(),
         });
     }
@@ -1941,8 +2300,9 @@ impl PlayerApp {
         } else {
             0.0
         };
-        let (_, requested) =
+        let (response, requested) =
             ui::slider(ui, seek_rect, "mini-seek", fraction, duration > 0.0, theme);
+        self.note_seek_drag(response.dragged());
         if let Some(value) = requested {
             self.seek_to(value);
         }
@@ -2204,6 +2564,7 @@ impl PlayerApp {
         let visible = self.visible.clone();
         let current = self.current;
         let mut clicked = None;
+        let mut right_clicked: Option<(usize, egui::Pos2)> = None;
         let mut scroll_to_current = self.scroll_to_current;
 
         // A landscape box scrolls the tracks sideways as a card strip; a
@@ -2350,6 +2711,10 @@ impl PlayerApp {
                             if response.clicked() {
                                 clicked = Some(index);
                             }
+                            if response.secondary_clicked() {
+                                right_clicked =
+                                    Some((index, response.interact_pointer_pos().unwrap_or(rect.center())));
+                            }
                         }
                     });
                 });
@@ -2467,6 +2832,10 @@ impl PlayerApp {
                     if response.clicked() {
                         clicked = Some(index);
                     }
+                    if response.secondary_clicked() {
+                        right_clicked =
+                            Some((index, response.interact_pointer_pos().unwrap_or(rect.center())));
+                    }
                 }
             });
         }
@@ -2513,6 +2882,15 @@ impl PlayerApp {
             } else {
                 self.play_index(index);
             }
+        }
+        if let Some((index, pos)) = right_clicked {
+            // Right-click opens the song's menu; the opening click must not
+            // close it again this frame.
+            self.track_menu_index = Some(index);
+            self.track_menu_pos = pos;
+            self.track_menu_open = true;
+            self.track_menu_new_open = false;
+            self.track_menu_ignore_click = true;
         }
     }
 
@@ -2887,7 +3265,7 @@ impl PlayerApp {
             pos2(left + time_width + 8.0, seek_y - 9.0),
             pos2(right - time_width - 8.0, seek_y + 9.0),
         );
-        let (_, requested) = ui::slider(
+        let (response, requested) = ui::slider(
             ui,
             seek_rect,
             "player-seek",
@@ -2895,6 +3273,7 @@ impl PlayerApp {
             duration > 0.0,
             &theme,
         );
+        self.note_seek_drag(response.dragged());
         if let Some(value) = requested {
             self.seek_to(value);
         }
@@ -3216,7 +3595,131 @@ impl PlayerApp {
             self.set_parallel(parallel);
         }
 
-        let path_text = format!("Saving to  {}", self.library_root.display());
+        // Where new downloads land: All music (the root) or a playlist.
+        let mut open_target_menu = false;
+        let mut target_chip_rect = Rect::NOTHING;
+        child.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.label(egui::RichText::new("SAVE TO").size(9.5).color(theme.muted()));
+            let target_label = match &self.download_target {
+                Some(name) => name.clone(),
+                None => "ALL MUSIC".to_string(),
+            };
+            let avail = ui.available_width();
+            let chip_width =
+                (target_label.chars().count() as f32 * 6.6 + 34.0).clamp(64.0, (avail - 8.0).max(64.0));
+            let shown = ui::ellipsize(
+                ui.painter(),
+                &target_label,
+                &FontId::proportional(11.0),
+                theme.text(),
+                chip_width - 16.0,
+            );
+            let response = ui::chip_button(
+                ui,
+                &shown,
+                self.download_target.is_some(),
+                chip_width,
+                &theme,
+                GlassSlot::OptionChip,
+            )
+            .on_hover_text("Choose the playlist new downloads are added to");
+            target_chip_rect = response.rect;
+            if response.clicked() {
+                open_target_menu = true;
+            }
+        });
+        if open_target_menu {
+            // Opening the playlist picker means "I'm not creating one right
+            // now" — hide the inline creator so it never lingers.
+            self.download_target_menu_open = true;
+            self.download_target_menu_pos = target_chip_rect.left_bottom() + vec2(0.0, 6.0);
+            self.download_target_menu_ignore_click = true;
+            self.download_new_open = false;
+            self.download_new_playlist.clear();
+            self.download_status = None;
+            self.download_failed = false;
+        }
+
+        // Inline creator shown only after "New playlist…" is picked in the menu.
+        if self.download_new_open {
+            // Escape backs out without creating anything.
+            if child.input(|input| input.key_pressed(egui::Key::Escape)) {
+                self.download_new_open = false;
+                self.download_new_playlist.clear();
+                self.download_status = None;
+                self.download_failed = false;
+            }
+        }
+        if self.download_new_open {
+            child.horizontal(|ui| {
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.download_new_playlist)
+                        .hint_text("New playlist name…")
+                        .font(FontId::proportional(11.5))
+                        .text_color(theme.text())
+                        .desired_width((ui.available_width() - 132.0).max(40.0))
+                        .margin(egui::Margin::symmetric(6, 4)),
+                );
+                if self.download_new_focus {
+                    response.request_focus();
+                    self.download_new_focus = false;
+                }
+                let mut create =
+                    response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                if ui::chip_button(ui, "CREATE", true, 66.0, &theme, GlassSlot::DownloaderAction)
+                    .clicked()
+                {
+                    create = true;
+                }
+                if ui::chip_button(ui, "CANCEL", false, 58.0, &theme, GlassSlot::DownloaderAction)
+                    .clicked()
+                {
+                    self.download_new_open = false;
+                    self.download_new_playlist.clear();
+                    self.download_status = None;
+                    self.download_failed = false;
+                }
+                if create {
+                    self.create_download_playlist();
+                }
+            });
+        }
+
+        // Update mode: only meaningful with a concrete playlist target.
+        if self.download_target.is_some() {
+            child.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.label(egui::RichText::new("UPDATE").size(9.5).color(theme.muted()));
+                let response = ui::chip_button(
+                    ui,
+                    "SKIP EXISTING",
+                    self.download_skip_existing,
+                    106.0,
+                    &theme,
+                    GlassSlot::OptionChip,
+                )
+                .on_hover_text(
+                    "Songs already in this playlist are not downloaded again — only the missing ones.",
+                );
+                if response.clicked() {
+                    self.download_skip_existing = !self.download_skip_existing;
+                    self.save_config();
+                }
+                ui.label(
+                    egui::RichText::new(if self.download_skip_existing {
+                        "Only songs missing from the playlist download"
+                    } else {
+                        "Everything downloads, even if already present"
+                    })
+                    .size(9.0)
+                    .color(theme.faint()),
+                );
+            });
+        }
+
+        let destination = self.download_destination_folder();
+        let path_text = format!("Saving to  {}", destination.display());
         child.label(
             egui::RichText::new(ui::ellipsize(
                 child.painter(),
@@ -3497,6 +4000,437 @@ impl PlayerApp {
                     theme.faint(),
                 );
             }
+        }
+    }
+
+    /// Creates the folder typed into the downloader's "new playlist" input
+    /// and selects it as the download target.
+    fn create_download_playlist(&mut self) {
+        let raw = self.download_new_playlist.trim().to_string();
+        if raw.is_empty() {
+            self.download_status = Some("Type a playlist name first.".to_string());
+            self.download_failed = true;
+            return;
+        }
+        let name = download::sanitize_folder(&raw);
+        let folder = Self::playlist_folder(&self.library_root, &name);
+
+        if let Err(err) = Self::ensure_folder_writable(&folder) {
+            // Keep the input open so the name can be fixed or the folder
+            // changed without starting over.
+            self.download_status = Some(err);
+            self.download_failed = true;
+            return;
+        }
+
+        self.download_status = None;
+        self.download_failed = false;
+        self.download_target = Some(name);
+        self.download_new_open = false;
+        self.download_new_playlist.clear();
+        self.save_config();
+    }
+
+    /// Menu listing every playlist (plus All music and a new-playlist
+    /// option) that the SAVE TO chip in the downloader opens.
+    fn download_target_menu(&mut self, ctx: &egui::Context) {
+        if !self.download_target_menu_open {
+            self.download_target_menu_ignore_click = false;
+            return;
+        }
+        let theme = self.theme;
+        let screen = ctx.content_rect();
+        let playlists = self.playlists();
+        let mut picked: Option<Option<String>> = None;
+        let mut new_playlist = false;
+
+        egui::Area::new(Id::unique("download-target-overlay"))
+            .order(egui::Order::Foreground)
+            .fade_in(false)
+            .fixed_pos(screen.min)
+            .show(ctx, |ui| {
+                let (backdrop, _) = ui.allocate_exact_size(screen.size(), Sense::hover());
+                ui.painter().rect_filled(
+                    backdrop,
+                    0.0,
+                    Color32::from_rgba_unmultiplied(0, 0, 0, 24),
+                );
+
+                let width = 268.0;
+                let list_height = (playlists.len() as f32 * 30.0).min(210.0);
+                let height = 26.0 + 34.0 + 30.0 + list_height + 46.0 + 12.0;
+                let pos = pos2(
+                    self.download_target_menu_pos
+                        .x
+                        .clamp(screen.left() + 4.0, (screen.right() - width - 4.0).max(screen.left() + 4.0)),
+                    self.download_target_menu_pos
+                        .y
+                        .clamp(screen.top() + 4.0, (screen.bottom() - height - 4.0).max(screen.top() + 4.0)),
+                );
+
+                let mut menu_ui = ui.new_child(
+                    UiBuilder::new()
+                        .max_rect(Rect::from_min_size(pos, vec2(width, height)))
+                        .id_salt("download-target-card"),
+                );
+                let menu_glass = crate::glass::enabled(&theme, GlassSlot::Menu);
+                let menu = egui::Frame::NONE
+                    .fill(crate::glass::menu_fill(&theme).unwrap_or_else(|| theme.panel_top()))
+                    .stroke(if menu_glass {
+                        Stroke::NONE
+                    } else {
+                        Stroke::new(1.0_f32, theme.accent_line())
+                    })
+                    .corner_radius(CornerRadius::from(12.0))
+                    .inner_margin(egui::Margin::symmetric(6, 6))
+                    .show(&mut menu_ui, |ui| {
+                        ui.set_min_width(240.0);
+                        ui.label(
+                            egui::RichText::new("SAVE DOWNLOADS TO")
+                                .size(9.5)
+                                .color(theme.faint())
+                                .strong(),
+                        );
+                        ui.label(
+                            egui::RichText::new(
+                                "New songs are added straight into the chosen playlist folder.",
+                            )
+                            .size(9.0)
+                            .color(theme.faint()),
+                        );
+                        ui.add_space(2.0);
+
+                        if ui::menu_toggle_item(
+                            ui,
+                            "All music",
+                            self.download_target.is_none(),
+                            &theme,
+                        )
+                        .clicked()
+                        {
+                            picked = Some(None);
+                        }
+
+                        if !playlists.is_empty() {
+                            ui.label(
+                                egui::RichText::new("YOUR PLAYLISTS")
+                                    .size(9.5)
+                                    .color(theme.faint())
+                                    .strong(),
+                            );
+                            egui::ScrollArea::vertical()
+                                .max_height(list_height)
+                                .show(ui, |ui| {
+                                    for (name, count) in &playlists {
+                                        let selected =
+                                            self.download_target.as_deref() == Some(name.as_str());
+                                        if playlist_option_row(ui, name, *count, selected, &theme)
+                                            .clicked()
+                                        {
+                                            picked = Some(Some(name.clone()));
+                                        }
+                                    }
+                                });
+                        }
+
+                        if ui::menu_item(ui, "New playlist…", Glyph::Plus, &theme).clicked() {
+                            new_playlist = true;
+                        }
+                    });
+                crate::glass::paint_menu_rim(
+                    menu_ui.painter(),
+                    menu.response.rect,
+                    12.0,
+                    &theme,
+                );
+                self.download_target_menu_rect = menu.response.rect;
+
+                let clicked = ui.ctx().input(|input| input.pointer.any_click());
+                let pointer = ui.ctx().input(|input| input.pointer.interact_pos());
+                if menu_should_close(
+                    self.download_target_menu_ignore_click,
+                    clicked,
+                    pointer,
+                    self.download_target_menu_rect,
+                ) {
+                    self.download_target_menu_open = false;
+                }
+                self.download_target_menu_ignore_click = false;
+            });
+
+        if new_playlist {
+            self.download_target_menu_open = false;
+            self.download_new_open = true;
+            self.download_new_focus = true;
+            self.download_new_playlist.clear();
+        }
+        if let Some(choice) = picked {
+            self.download_target = choice;
+            self.download_target_menu_open = false;
+            // Picking an existing playlist ends the "new playlist" flow.
+            self.download_new_open = false;
+            self.download_new_playlist.clear();
+            self.download_status = None;
+            self.download_failed = false;
+            self.save_config();
+        }
+    }
+
+    /// Right-click menu of one song: play it, move it into any playlist
+    /// (existing or brand new), or take it back out to All music.
+    fn track_menu(&mut self, ctx: &egui::Context) {
+        if !self.track_menu_open {
+            self.track_menu_ignore_click = false;
+            return;
+        }
+        let Some(index) = self.track_menu_index else {
+            self.track_menu_open = false;
+            return;
+        };
+        let Some(track) = self.tracks.get(index) else {
+            self.track_menu_open = false;
+            return;
+        };
+
+        let theme = self.theme;
+        let screen = ctx.content_rect();
+        let title = track.title.clone();
+        let artist = track.artist.clone();
+        let in_playlist = track.playlist.clone();
+        let playlists: Vec<(String, usize)> = self
+            .playlists()
+            .into_iter()
+            .filter(|(name, _)| in_playlist.as_deref() != Some(name.as_str()))
+            .collect();
+
+        let mut play = false;
+        let mut move_to: Option<Option<String>> = None;
+        let mut new_playlist = false;
+        let mut create_and_move = false;
+        self.track_menu_row_rects.clear();
+
+        // A stable Area id keeps the text edit's focus while typing;
+        // `Id::new` is egui's deterministic constructor for exactly that.
+        #[allow(deprecated)]
+        let menu_area_id = Id::new("br1-song-menu");
+        egui::Area::new(menu_area_id)
+            .order(egui::Order::Foreground)
+            .fade_in(false)
+            .fixed_pos(screen.min)
+            .show(ctx, |ui| {
+                let (backdrop, _) = ui.allocate_exact_size(screen.size(), Sense::hover());
+                ui.painter().rect_filled(
+                    backdrop,
+                    0.0,
+                    Color32::from_rgba_unmultiplied(0, 0, 0, 24),
+                );
+
+                let width = 268.0;
+                let list_height = (playlists.len() as f32 * 30.0).min(210.0);
+                let height = if self.track_menu_new_open {
+                    52.0 + 38.0 + 26.0 + 34.0 + 12.0
+                } else {
+                    52.0
+                        + 38.0
+                        + 24.0
+                        + list_height
+                        + 38.0
+                        + if in_playlist.is_some() { 38.0 } else { 0.0 }
+                        + 12.0
+                };
+                let pos = pos2(
+                    self.track_menu_pos
+                        .x
+                        .clamp(screen.left() + 4.0, (screen.right() - width - 4.0).max(screen.left() + 4.0)),
+                    self.track_menu_pos
+                        .y
+                        .clamp(screen.top() + 4.0, (screen.bottom() - height - 4.0).max(screen.top() + 4.0)),
+                );
+
+                let mut menu_ui = ui.new_child(
+                    UiBuilder::new()
+                        .max_rect(Rect::from_min_size(pos, vec2(width, height)))
+                        .id_salt("song-menu-card"),
+                );
+                let menu_glass = crate::glass::enabled(&theme, GlassSlot::Menu);
+                let menu = egui::Frame::NONE
+                    .fill(crate::glass::menu_fill(&theme).unwrap_or_else(|| theme.panel_top()))
+                    .stroke(if menu_glass {
+                        Stroke::NONE
+                    } else {
+                        Stroke::new(1.0_f32, theme.accent_line())
+                    })
+                    .corner_radius(CornerRadius::from(12.0))
+                    .inner_margin(egui::Margin::symmetric(6, 6))
+                    .show(&mut menu_ui, |ui| {
+                        ui.set_min_width(236.0);
+                        ui.label(
+                            egui::RichText::new("SONG")
+                                .size(9.5)
+                                .color(theme.faint())
+                                .strong(),
+                        );
+                        let title_font = FontId::proportional(13.0);
+                        let shown_title = ui::ellipsize(
+                            ui.painter(),
+                            &title,
+                            &title_font,
+                            theme.text(),
+                            212.0,
+                        );
+                        ui.label(egui::RichText::new(shown_title).size(13.0).color(theme.text()));
+                        if !artist.is_empty() && artist != "Unknown artist" {
+                            let artist_font = FontId::proportional(9.5);
+                            let shown_artist = ui::ellipsize(
+                                ui.painter(),
+                                &artist,
+                                &artist_font,
+                                theme.muted(),
+                                212.0,
+                            );
+                            ui.label(
+                                egui::RichText::new(shown_artist)
+                                    .size(9.5)
+                                    .color(theme.muted()),
+                            );
+                        }
+
+                        if ui::menu_item(ui, "Play", Glyph::Play, &theme).clicked() {
+                            play = true;
+                        }
+
+                        if self.track_menu_new_open {
+                            ui.label(
+                                egui::RichText::new("NEW PLAYLIST")
+                                    .size(9.5)
+                                    .color(theme.faint())
+                                    .strong(),
+                            );
+                            let response = ui.add(
+                                egui::TextEdit::singleline(&mut self.track_menu_new_name)
+                                    .hint_text("Playlist name…")
+                                    .font(FontId::proportional(12.0))
+                                    .text_color(theme.text())
+                                    .desired_width((ui.available_width() - 74.0).max(40.0))
+                                    .margin(egui::Margin::symmetric(6, 4)),
+                            );
+                            if self.track_menu_new_focus {
+                                response.request_focus();
+                                self.track_menu_new_focus = false;
+                            }
+                            let mut create = response.lost_focus()
+                                && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                            if ui::chip_button(
+                                ui,
+                                "MOVE",
+                                true,
+                                64.0,
+                                &theme,
+                                GlassSlot::DownloaderAction,
+                            )
+                            .clicked()
+                            {
+                                create = true;
+                            }
+                            if create {
+                                create_and_move = true;
+                            }
+                        } else {
+                            ui.label(
+                                egui::RichText::new(if in_playlist.is_some() {
+                                    "MOVE TO PLAYLIST"
+                                } else {
+                                    "ADD TO PLAYLIST"
+                                })
+                                .size(9.5)
+                                .color(theme.faint())
+                                .strong(),
+                            );
+                            if playlists.is_empty() {
+                                ui.label(
+                                    egui::RichText::new("You have no other playlists yet.")
+                                        .size(9.0)
+                                        .color(theme.faint()),
+                                );
+                            }
+                            egui::ScrollArea::vertical()
+                                .max_height(list_height)
+                                .show(ui, |ui| {
+                                    for (name, count) in &playlists {
+                                        let response =
+                                            playlist_option_row(ui, name, *count, false, &theme);
+                                        self.track_menu_row_rects
+                                            .push((name.clone(), response.rect));
+                                        if response.clicked() {
+                                            move_to = Some(Some(name.clone()));
+                                        }
+                                    }
+                                });
+                            if ui::menu_item(ui, "New playlist…", Glyph::Plus, &theme).clicked() {
+                                new_playlist = true;
+                            }
+                            // Nested on purpose: the menu item must always be
+                            // laid out and painted before its click state is
+                            // read, which a collapsed `&&` would skip.
+                            #[allow(clippy::collapsible_if)]
+                            if in_playlist.is_some() {
+                                if ui::menu_item(ui, "Remove from playlist", Glyph::Close, &theme)
+                                    .on_hover_text("Back to All music — the file stays in your library")
+                                    .clicked()
+                                {
+                                    move_to = Some(None);
+                                }
+                            }
+                        }
+                    });
+                crate::glass::paint_menu_rim(
+                    menu_ui.painter(),
+                    menu.response.rect,
+                    12.0,
+                    &theme,
+                );
+                self.track_menu_rect = menu.response.rect;
+
+                let clicked = ui.ctx().input(|input| input.pointer.any_click());
+                let pointer = ui.ctx().input(|input| input.pointer.interact_pos());
+                if menu_should_close(
+                    self.track_menu_ignore_click,
+                    clicked,
+                    pointer,
+                    self.track_menu_rect,
+                ) {
+                    self.track_menu_open = false;
+                    self.track_menu_new_open = false;
+                }
+                self.track_menu_ignore_click = false;
+            });
+
+        if new_playlist {
+            self.track_menu_new_open = true;
+            self.track_menu_new_focus = true;
+            self.track_menu_new_name.clear();
+        }
+        if create_and_move {
+            let raw = self.track_menu_new_name.trim().to_string();
+            if !raw.is_empty() {
+                let name = download::sanitize_folder(&raw);
+                self.move_track_to_playlist(index, Some(&name));
+                self.track_menu_open = false;
+                self.track_menu_new_open = false;
+            }
+        }
+        if let Some(choice) = move_to {
+            match choice {
+                Some(name) => self.move_track_to_playlist(index, Some(&name)),
+                None => self.move_track_to_playlist(index, None),
+            }
+            self.track_menu_open = false;
+            self.track_menu_new_open = false;
+        }
+        if play {
+            self.play_index(index);
+            self.track_menu_open = false;
+            self.track_menu_new_open = false;
         }
     }
 
@@ -5099,6 +6033,16 @@ impl PlayerApp {
                                 if response.clicked() {
                                     action = Some((true, *index));
                                 }
+                                if response.secondary_clicked() {
+                                    // Same right-click menu as the song list.
+                                    self.track_menu_index = Some(*index);
+                                    self.track_menu_pos = response
+                                        .interact_pointer_pos()
+                                        .unwrap_or(row.center());
+                                    self.track_menu_open = true;
+                                    self.track_menu_new_open = false;
+                                    self.track_menu_ignore_click = true;
+                                }
                             }
                         }
                         if !playlist_hits.is_empty() {
@@ -6567,7 +7511,9 @@ impl PlayerApp {
         ui.add_space(8.0);
         ui.label(
             egui::RichText::new(
-                "The downloader saves every track under the music folder; playlist downloads get their own subfolder and cover.",
+                "Every track lands under the music folder. SAVE TO in the downloader panel \
+                 sends new songs straight into a playlist, and right-clicking a song moves \
+                 it between playlists. Playlist links still fetch their own cover.",
             )
             .size(10.5)
             .color(theme.faint()),
@@ -6658,6 +7604,14 @@ impl PlayerApp {
         self.sync_eq();
         self.tick(ctx);
         self.handle_keys(ctx);
+        // A frame without a seek drag means the handle was released: restore
+        // the music. Deliberately one frame late, so the last seek of a drag
+        // is already silent.
+        if !std::mem::take(&mut self.seek_drag_seen) {
+            if let Some(audio) = &mut self.audio {
+                audio.set_seeking(false);
+            }
+        }
         self.autosave(ctx);
         self.ensure_textures(ctx);
         self.ensure_playlist_textures(ctx);
@@ -6856,6 +7810,8 @@ impl PlayerApp {
                     self.add_menu(ctx);
                     self.search_overlay(ctx);
                     self.sort_menu(ctx);
+                    self.download_target_menu(ctx);
+                    self.track_menu(ctx);
                     if self.settings_open {
                         self.settings_modal(ctx);
                     }
@@ -7115,6 +8071,49 @@ fn menu_should_close(
     }
 }
 
+/// One playlist row of the download-target and song menus: name on the
+/// left, song count on the right, highlight when selected.
+fn playlist_option_row(
+    ui: &mut Ui,
+    name: &str,
+    count: usize,
+    selected: bool,
+    theme: &Theme,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
+    let painter = ui.painter();
+    if response.hovered() || selected {
+        painter.rect_filled(
+            rect,
+            CornerRadius::from(9.0),
+            Color32::from_rgba_unmultiplied(255, 255, 255, if selected { 30 } else { 18 }),
+        );
+    }
+
+    let name_font = FontId::proportional(12.0);
+    let name_color = if selected { theme.text() } else { theme.muted() };
+    let label = ui::ellipsize(painter, name, &name_font, name_color, rect.width() - 66.0);
+    painter.text(
+        pos2(rect.left() + 14.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        label,
+        name_font.clone(),
+        name_color,
+    );
+    painter.text(
+        pos2(rect.right() - 12.0, rect.center().y),
+        Align2::RIGHT_CENTER,
+        if count == 1 {
+            "1 song".to_string()
+        } else {
+            format!("{count} songs")
+        },
+        FontId::proportional(9.0),
+        theme.faint(),
+    );
+    response.on_hover_cursor(CursorIcon::PointingHand)
+}
+
 /// Content dims into shadow near a scroll border instead of getting a
 /// straight cut. Two stacked near-black ramps keep the transition free of a
 /// visible start line: the inner part is barely there, only the last few
@@ -7360,5 +8359,470 @@ mod glass_click_tests {
         // Clicking outside the menu closes it.
         click(&ctx, &mut app, screen, pos2(900.0, 700.0), 3.0);
         assert!(!app.add_menu_open, "outside click should close the menu");
+    }
+}
+
+#[cfg(test)]
+mod playlist_feature_tests {
+    use super::*;
+
+    fn run_frame(
+        ctx: &egui::Context,
+        app: &mut PlayerApp,
+        input: egui::RawInput,
+        _screen: Rect,
+    ) {
+        let mut output = ctx.run_ui(input, |ui| {
+            app.draw_background(ui);
+            app.draw_foreground(ui);
+        });
+        output.textures_delta.clear();
+    }
+
+    fn frame_input(screen: Rect, time: f64, events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(screen),
+            time: Some(time),
+            focused: true,
+            events,
+            ..Default::default()
+        }
+    }
+
+    fn press(
+        ctx: &egui::Context,
+        app: &mut PlayerApp,
+        screen: Rect,
+        pos: egui::Pos2,
+        time: f64,
+        button: egui::PointerButton,
+    ) {
+        let frames = [
+            frame_input(screen, time, vec![egui::Event::PointerMoved(pos)]),
+            frame_input(
+                screen,
+                time + 0.05,
+                vec![egui::Event::PointerButton {
+                    pos,
+                    button,
+                    pressed: true,
+                    modifiers: Default::default(),
+                }],
+            ),
+            frame_input(
+                screen,
+                time + 0.1,
+                vec![egui::Event::PointerButton {
+                    pos,
+                    button,
+                    pressed: false,
+                    modifiers: Default::default(),
+                }],
+            ),
+        ];
+        for frame in frames {
+            run_frame(ctx, app, frame, screen);
+        }
+    }
+
+    fn click(ctx: &egui::Context, app: &mut PlayerApp, screen: Rect, pos: egui::Pos2, time: f64) {
+        press(ctx, app, screen, pos, time, egui::PointerButton::Primary);
+    }
+
+    fn right_click(
+        ctx: &egui::Context,
+        app: &mut PlayerApp,
+        screen: Rect,
+        pos: egui::Pos2,
+        time: f64,
+    ) {
+        press(ctx, app, screen, pos, time, egui::PointerButton::Secondary);
+    }
+
+    fn test_track(path: PathBuf, playlist: Option<&str>) -> Track {
+        let title = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("Unknown title")
+            .to_string();
+        Track {
+            path,
+            title,
+            artist: "Test artist".to_string(),
+            album: String::new(),
+            duration: 120.0,
+            thumb: None,
+            art: None,
+            folder: None,
+            playlist: playlist.map(str::to_string),
+            added: 0,
+        }
+    }
+
+    /// A hermetic app on a small temporary library, with the current
+    /// playlist panel parked at its default spot on the dashboard.
+    fn app_with_library(root: &std::path::Path) -> (egui::Context, PlayerApp) {
+        let ctx = egui::Context::default();
+        let mut app = PlayerApp::new(&ctx, Vec::new(), false, false, None, false);
+        app.view = View::Dashboard;
+        app.library_root = root.to_path_buf();
+        app.manager.settings.root = root.to_path_buf();
+        // Pin the layout and sort so the row positions are predictable
+        // whatever the real saved settings of this machine say.
+        app.config.ui.panels[PanelKind::CurrentPlaylist.index()] =
+            UiConfig::default().panels[PanelKind::CurrentPlaylist.index()];
+        app.config.ui.track_sort = TrackSort::Added;
+        (ctx, app)
+    }
+
+    fn wait_for_scan(ctx: &egui::Context, app: &mut PlayerApp) {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while app.scanning && Instant::now() < deadline {
+            app.poll_scan(ctx);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!app.scanning, "the library refresh should finish");
+    }
+
+    #[test]
+    fn right_click_moves_a_song_into_a_playlist() {
+        let root = std::env::temp_dir().join("br1-player-move-ui-test");
+        let _ = std::fs::remove_dir_all(&root);
+        let mix = root.join("Mix");
+        std::fs::create_dir_all(&mix).unwrap();
+        std::fs::write(root.join("Song One.mp3"), b"x").unwrap();
+        std::fs::write(mix.join("Existing.mp3"), b"x").unwrap();
+
+        let (ctx, mut app) = app_with_library(&root);
+        app.tracks = vec![
+            test_track(root.join("Song One.mp3"), None),
+            test_track(mix.join("Existing.mp3"), Some("Mix")),
+        ];
+        app.thumbs = vec![None; 2];
+        app.rebuild_visible();
+
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(1180.0, 760.0));
+        run_frame(&ctx, &mut app, frame_input(screen, 0.5, Vec::new()), screen);
+
+        // The first song row: a 48px-tall interactive rect in the left panel.
+        let row = ctx
+            .interactive_rects_last_pass()
+            .into_iter()
+            .filter(|rect| rect.height() == 48.0 && rect.left() < 300.0 && rect.width() > 100.0)
+            .min_by_key(|rect| rect.top() as i32)
+            .expect("the song list should be interactive");
+
+        right_click(&ctx, &mut app, screen, row.center(), 1.0);
+        assert!(app.track_menu_open, "right-click should open the song menu");
+        assert_eq!(app.track_menu_index, Some(0));
+
+        // The menu lists every other playlist; its rows record their rects
+        // (same pattern as plus_rect) so the click lands precisely.
+        let playlist_row = app
+            .track_menu_row_rects
+            .iter()
+            .find(|(name, _)| name == "Mix")
+            .map(|(_, rect)| *rect)
+            .expect("the Mix playlist should be listed in the menu");
+
+        click(&ctx, &mut app, screen, playlist_row.center(), 2.0);
+        assert!(!app.track_menu_open, "picking a playlist closes the menu");
+        assert!(
+            mix.join("Song One.mp3").is_file(),
+            "the file should land in the playlist folder"
+        );
+        assert!(!root.join("Song One.mp3").exists());
+
+        wait_for_scan(&ctx, &mut app);
+        let moved = app
+            .tracks
+            .iter()
+            .find(|track| track.path == mix.join("Song One.mp3"))
+            .expect("the moved song should still be in the library");
+        assert_eq!(moved.playlist.as_deref(), Some("Mix"));
+    }
+
+    #[test]
+    fn song_menu_closes_on_an_outside_click() {
+        let root = std::env::temp_dir().join("br1-player-song-menu-close");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("Song One.mp3"), b"x").unwrap();
+
+        let (ctx, mut app) = app_with_library(&root);
+        app.tracks = vec![test_track(root.join("Song One.mp3"), None)];
+        app.thumbs = vec![None; 1];
+        app.rebuild_visible();
+
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(1180.0, 760.0));
+        run_frame(&ctx, &mut app, frame_input(screen, 0.5, Vec::new()), screen);
+
+        let row = ctx
+            .interactive_rects_last_pass()
+            .into_iter()
+            .filter(|rect| rect.height() == 48.0 && rect.left() < 300.0 && rect.width() > 100.0)
+            .min_by_key(|rect| rect.top() as i32)
+            .expect("the song list should be interactive");
+
+        right_click(&ctx, &mut app, screen, row.center(), 1.0);
+        assert!(app.track_menu_open);
+
+        // Idle frames must not close it by themselves.
+        for step in 0..3 {
+            run_frame(
+                &ctx,
+                &mut app,
+                frame_input(screen, 1.5 + step as f64 * 0.1, Vec::new()),
+                screen,
+            );
+        }
+        assert!(app.track_menu_open, "the menu closed by itself");
+
+        // A click outside the card does.
+        click(&ctx, &mut app, screen, pos2(900.0, 700.0), 2.0);
+        assert!(!app.track_menu_open, "outside click should close the menu");
+    }
+
+    #[test]
+    fn moving_a_song_keeps_its_play_count_and_refreshes_the_library() {
+        let root = std::env::temp_dir().join("br1-player-move-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("Mix")).unwrap();
+        std::fs::write(root.join("Song.mp3"), b"x").unwrap();
+
+        let (ctx, mut app) = app_with_library(&root);
+        app.tracks = vec![test_track(root.join("Song.mp3"), None)];
+        app.thumbs = vec![None; 1];
+        app.rebuild_visible();
+        let old_key = root.join("Song.mp3").to_string_lossy().to_string();
+        app.config.ui.track_plays.insert(old_key.clone(), 7);
+
+        app.move_track_to_playlist(0, Some("Mix"));
+
+        let moved = root.join("Mix").join("Song.mp3");
+        assert!(moved.is_file(), "the file should have moved");
+        assert!(!root.join("Song.mp3").exists());
+        let new_key = moved.to_string_lossy().to_string();
+        assert_eq!(app.config.ui.track_plays.get(&new_key), Some(&7));
+        assert!(app.config.ui.track_plays.get(&old_key).is_none());
+
+        wait_for_scan(&ctx, &mut app);
+        assert_eq!(app.tracks.len(), 1);
+        assert_eq!(app.tracks[0].playlist.as_deref(), Some("Mix"));
+        assert_eq!(
+            app.status.as_deref(),
+            Some("Moved “Song” to “Mix”.")
+        );
+    }
+
+    #[test]
+    fn removing_a_song_from_a_playlist_sends_it_back_to_all_music() {
+        let root = std::env::temp_dir().join("br1-player-unmove-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("Mix")).unwrap();
+        std::fs::write(root.join("Mix").join("Song.mp3"), b"x").unwrap();
+
+        let (ctx, mut app) = app_with_library(&root);
+        let in_mix = root.join("Mix").join("Song.mp3");
+        app.tracks = vec![test_track(in_mix.clone(), Some("Mix"))];
+        app.thumbs = vec![None; 1];
+        app.rebuild_visible();
+
+        app.move_track_to_playlist(0, None);
+
+        assert!(root.join("Song.mp3").is_file());
+        assert!(!in_mix.exists());
+        wait_for_scan(&ctx, &mut app);
+        assert_eq!(app.tracks.len(), 1);
+        assert_eq!(app.tracks[0].playlist, None);
+    }
+
+    #[test]
+    fn download_target_menu_renders_and_closes() {
+        let root = std::env::temp_dir().join("br1-player-target-menu-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let (ctx, mut app) = app_with_library(&root);
+        app.download_target_menu_open = true;
+        app.download_target_menu_pos = pos2(400.0, 200.0);
+
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(1180.0, 760.0));
+        run_frame(&ctx, &mut app, frame_input(screen, 0.5, Vec::new()), screen);
+        assert!(
+            app.download_target_menu_rect.width() > 0.0,
+            "the target menu should be on screen"
+        );
+
+        // Idle frames keep it open; a click outside closes it.
+        for step in 0..3 {
+            run_frame(
+                &ctx,
+                &mut app,
+                frame_input(screen, 0.8 + step as f64 * 0.1, Vec::new()),
+                screen,
+            );
+        }
+        assert!(app.download_target_menu_open, "the menu closed by itself");
+
+        click(&ctx, &mut app, screen, pos2(40.0, 730.0), 1.2);
+        assert!(
+            !app.download_target_menu_open,
+            "outside click should close the target menu"
+        );
+        // Nothing was picked, so no config write happened either way.
+        assert_eq!(app.download_target, None);
+    }
+
+    #[test]
+    fn writable_folders_pass_the_preflight_and_leave_no_probe_behind() {
+        let root = std::env::temp_dir().join("br1-player-writable-preflight");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let playlist = root.join("Ambience");
+
+        PlayerApp::ensure_folder_writable(&playlist).expect("creatable folder should pass");
+        assert!(playlist.is_dir(), "the folder should have been created");
+        assert!(
+            probe_files(&playlist).is_empty(),
+            "the probe file must be removed: {:?}",
+            probe_files(&playlist)
+        );
+    }
+
+    /// Lists every write probe left in `folder`, including the fixed name used
+    /// by older builds.
+    fn probe_files(folder: &std::path::Path) -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir(folder) else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.starts_with(".br1-write-check"))
+            .collect()
+    }
+
+    #[test]
+    fn a_leftover_read_only_probe_does_not_block_the_preflight() {
+        let root = std::env::temp_dir().join("br1-player-probe-leftover");
+        let _ = std::fs::remove_dir_all(&root);
+        let folder = root.join("Ambience");
+        std::fs::create_dir_all(&folder).unwrap();
+
+        // Standing in for a probe an older build left behind and something
+        // later locked down: writing to the old fixed name fails with
+        // "access denied" even though the folder itself accepts files.
+        let legacy = folder.join(".br1-write-check");
+        std::fs::write(&legacy, b"leftover").unwrap();
+        if let Ok(meta) = std::fs::metadata(&legacy) {
+            let mut perms = meta.permissions();
+            perms.set_readonly(true);
+            let _ = std::fs::set_permissions(&legacy, perms);
+        }
+
+        PlayerApp::ensure_folder_writable(&folder)
+            .expect("a stale probe must not be reported as a permission problem");
+        // The stale file may survive (it may be locked), but the check must not
+        // have added a probe of its own.
+        let fresh: Vec<String> = probe_files(&folder)
+            .into_iter()
+            .filter(|name| name != ".br1-write-check")
+            .collect();
+        assert!(fresh.is_empty(), "a new probe was left behind: {fresh:?}");
+
+        // Let the temporary folder be deleted again.
+        if let Ok(meta) = std::fs::metadata(&legacy) {
+            let mut perms = meta.permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            perms.set_readonly(false);
+            let _ = std::fs::set_permissions(&legacy, perms);
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn new_playlist_input_stays_open_and_explains_a_blocked_folder() {
+        let root = std::env::temp_dir().join("br1-player-blocked-root");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // A file where the music folder should be makes every create fail,
+        // standing in for the "Access denied" case.
+        let blocked = root.join("blocked");
+        std::fs::write(&blocked, b"x").unwrap();
+
+        let (_ctx, mut app) = app_with_library(&blocked);
+        app.download_new_open = true;
+        app.download_new_playlist = "Ambience".to_string();
+        app.create_download_playlist();
+
+        assert!(app.download_failed);
+        assert!(app.download_new_open, "the input should stay open for a retry");
+        let message = app.download_status.clone().expect("an error message");
+        assert!(
+            message.contains(&blocked.display().to_string()),
+            "the message should name the folder: {message}"
+        );
+        assert_eq!(app.download_target, None, "no broken target is selected");
+    }
+
+    #[test]
+    fn a_blocked_folder_suggests_a_folder_fix_when_the_player_can_write_its_settings() {
+        let hint = PlayerApp::save_blocked_hint(true);
+        assert!(
+            hint.contains("CHANGE FOLDER"),
+            "changing the music folder is the fix here: {hint}"
+        );
+    }
+
+    #[test]
+    fn a_restricted_launch_is_not_blamed_on_the_music_folder() {
+        let hint = PlayerApp::save_blocked_hint(false);
+        assert!(
+            hint.contains("restricted write permissions"),
+            "the restriction itself must be named: {hint}"
+        );
+        assert!(
+            hint.contains("bin folder"),
+            "the fix is copying the app somewhere normal: {hint}"
+        );
+    }
+
+    #[test]
+    fn blocked_downloads_are_reported_before_anything_is_queued() {
+        let root = std::env::temp_dir().join("br1-player-blocked-download");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let blocked = root.join("blocked");
+        std::fs::write(&blocked, b"x").unwrap();
+
+        let (_ctx, mut app) = app_with_library(&blocked);
+        app.download_url = "https://youtu.be/abc".to_string();
+        app.start_download();
+
+        assert!(app.download_failed, "the click should report the problem");
+        assert!(
+            app.manager.jobs().is_empty(),
+            "nothing should be queued that cannot be written"
+        );
+        assert!(app.download_status.is_some());
+    }
+
+    #[test]
+    fn a_writable_destination_queues_the_link() {
+        let root = std::env::temp_dir().join("br1-player-ok-download");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let (_ctx, mut app) = app_with_library(&root);
+        app.download_target = Some("Mix".to_string());
+        app.download_url = "https://youtu.be/abc".to_string();
+        app.start_download();
+
+        assert!(!app.download_failed);
+        assert_eq!(app.manager.jobs().len(), 1);
+        assert_eq!(app.manager.jobs()[0].detail, "Queued → Mix");
+        // The playlist folder gets created up front by the preflight.
+        assert!(root.join("Mix").is_dir());
     }
 }

@@ -301,6 +301,28 @@ where
     }
 }
 
+/// Opens `path` as a decoder that supports random access.
+///
+/// `Decoder::new` builds without a byte length and reports itself as
+/// non-seekable: MP3 demuxers then answer "forward only" (skip ahead works,
+/// seeking back fails) and WAV cannot seek at all, which left the seekbar and
+/// the 5 s Left/Right jumps unable to rewind. `Decoder::try_from(File)` passes
+/// the file length and enables seeking in both directions.
+fn open_decoder(path: &Path) -> Result<Decoder<BufReader<File>>, String> {
+    let file = File::open(path).map_err(|err| format!("Cannot open file: {err}"))?;
+    Decoder::try_from(file).map_err(|err| format!("Unsupported audio format: {err}"))
+}
+
+/// Output gain for the current settings. A seek in progress silences the
+/// player on top of the user's own mute switch.
+fn output_gain(volume: f32, muted: bool, seeking: bool) -> f32 {
+    if muted || seeking {
+        0.0
+    } else {
+        volume.clamp(0.0, 1.0)
+    }
+}
+
 /// Thin wrapper around rodio: one sink for music, one optional sink for the
 /// HRTF test tone, plus a live EQ and a sample tap for the visualizer.
 pub struct AudioEngine {
@@ -309,6 +331,9 @@ pub struct AudioEngine {
     test_sink: Option<Player>,
     volume: f32,
     muted: bool,
+    /// True while the seek handle is moving: every jump would otherwise be
+    /// audible as a burst of stuttering, sped-up music.
+    seeking: bool,
     fx: Arc<FxShared>,
     spatial: Arc<SpatialShared>,
     hrtf_sets: Vec<spatial::HrtfSetInfo>,
@@ -327,6 +352,7 @@ impl AudioEngine {
             test_sink: None,
             volume: 0.8,
             muted: false,
+            seeking: false,
             fx: Arc::new(FxShared::new()),
             spatial: Arc::new(SpatialShared::new()),
             hrtf_sets: spatial::available_hrtf_sets(),
@@ -370,9 +396,7 @@ impl AudioEngine {
     }
 
     pub fn play(&mut self, path: &Path) -> Result<(), String> {
-        let file = File::open(path).map_err(|err| format!("Cannot open file: {err}"))?;
-        let source = Decoder::new(BufReader::new(file))
-            .map_err(|err| format!("Unsupported audio format: {err}"))?;
+        let source = open_decoder(path)?;
         let rate = source.sample_rate().get();
         self.ensure_hrtf(rate);
         self.spatial.set_sample_rate(rate);
@@ -535,10 +559,23 @@ impl AudioEngine {
     }
 
     fn effective_volume(&self) -> f32 {
-        if self.muted {
-            0.0
-        } else {
-            self.volume
+        output_gain(self.volume, self.muted, self.seeking)
+    }
+
+    /// Silences the output while the seek handle is being dragged and brings
+    /// the music back as soon as it is released. Seeking mid-song plays a
+    /// stuttering burst of every position it passes; muting during the drag
+    /// keeps that out of the speakers.
+    pub fn set_seeking(&mut self, seeking: bool) {
+        if self.seeking == seeking {
+            return;
+        }
+        self.seeking = seeking;
+        if let Some(sink) = &self.sink {
+            sink.set_volume(self.effective_volume());
+        }
+        if let Some(sink) = &self.test_sink {
+            sink.set_volume(self.effective_volume() * 0.75);
         }
     }
 
@@ -590,5 +627,75 @@ impl AudioEngine {
     /// True once the queued source has finished playing.
     pub fn finished(&self) -> bool {
         self.sink.as_ref().map(|sink| sink.empty()).unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// Minimal 16-bit mono WAV so the test needs no audio asset.
+    fn write_silent_wav(path: &Path, seconds: u32) {
+        let rate = 44_100u32;
+        let data_len = rate * seconds * 2;
+        let mut file = File::create(path).unwrap();
+        file.write_all(b"RIFF").unwrap();
+        file.write_all(&(36 + data_len).to_le_bytes()).unwrap();
+        file.write_all(b"WAVEfmt ").unwrap();
+        file.write_all(&16u32.to_le_bytes()).unwrap();
+        file.write_all(&1u16.to_le_bytes()).unwrap();
+        file.write_all(&1u16.to_le_bytes()).unwrap();
+        file.write_all(&rate.to_le_bytes()).unwrap();
+        file.write_all(&(rate * 2).to_le_bytes()).unwrap();
+        file.write_all(&2u16.to_le_bytes()).unwrap();
+        file.write_all(&16u16.to_le_bytes()).unwrap();
+        file.write_all(b"data").unwrap();
+        file.write_all(&data_len.to_le_bytes()).unwrap();
+        file.write_all(&vec![0u8; data_len as usize]).unwrap();
+    }
+
+    #[test]
+    fn the_player_decoder_can_seek_forward_and_back() {
+        let dir = std::env::temp_dir().join("br1-player-seek-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("silence.wav");
+        write_silent_wav(&path, 6);
+
+        let mut decoder = open_decoder(&path).expect("a WAV file should decode");
+        // Play a second, then jump forward, backward and back to the start.
+        // The old decoder answered "random access not supported" for every
+        // one of these (and only skipped forward on MP3).
+        for _ in 0..44_100 * 2 {
+            decoder.next();
+        }
+        decoder
+            .try_seek(Duration::from_secs(3))
+            .expect("forward seek should work");
+        decoder
+            .try_seek(Duration::from_secs(1))
+            .expect("backward seek should work");
+        decoder
+            .try_seek(Duration::ZERO)
+            .expect("seeking to the start should work");
+        assert!(
+            decoder.next().is_some(),
+            "audio should keep playing after seeking"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dragging_the_seek_handle_silences_the_output() {
+        assert_eq!(output_gain(0.8, false, false), 0.8, "normal playback");
+        assert_eq!(output_gain(0.8, false, true), 0.0, "seek in progress");
+        assert_eq!(output_gain(0.8, true, true), 0.0, "muted and seeking");
+        assert_eq!(output_gain(0.0, false, false), 0.0, "volume at zero");
+        assert_eq!(output_gain(1.5, false, false), 1.0, "volume is clamped");
+        // Releasing the handle must bring the music back even when the user
+        // did not touch the mute switch.
+        assert_eq!(output_gain(0.8, false, false), 0.8);
     }
 }

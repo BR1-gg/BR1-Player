@@ -12,6 +12,10 @@
 Thumbs.db
 .DS_Store
 
+# Private temp folder the bundled download tools fall back to when the
+# system temp folder is not writable.
+.br1-temp/
+
 # Note: the portable "BR1 Player.exe" in the project root is intentionally
 # tracked. A release build is also attached to GitHub Releases by the workflow.
 # Do not add a blanket *.exe rule here.

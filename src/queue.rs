@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -36,6 +37,13 @@ pub struct Job {
     position: u64,
     resolve: bool,
     subfolder: Option<String>,
+    /// Playlist folder chosen in the downloader panel for this link; `None`
+    /// means the music root. Captured at submit time so later changes of the
+    /// panel selector do not reroute jobs already queued.
+    target: Option<String>,
+    /// Update mode: resolved songs whose title already matches a file in
+    /// the destination folder are skipped instead of re-downloaded.
+    skip_existing: bool,
 }
 
 pub struct Settings {
@@ -116,8 +124,11 @@ impl Manager {
         self.running.len()
     }
 
-    /// Adds a link to the queue. Playlists are resolved into one job per track.
-    pub fn submit(&mut self, url: String) -> u64 {
+    /// Adds a link to the queue. Playlists are resolved into one job per
+    /// track. `target` routes the download into a playlist folder (`None` =
+    /// the music root); `skip_existing` turns on update mode, which drops
+    /// songs already present in the destination folder.
+    pub fn submit(&mut self, url: String, target: Option<String>, skip_existing: bool) -> u64 {
         let source = download::detect(&url);
         let resolve = source != Source::Spotify && download::is_list_url(&url);
         let id = self.next_id;
@@ -141,6 +152,8 @@ impl Manager {
             progress: None,
             detail: if resolve {
                 "Looking up tracks".to_string()
+            } else if let Some(name) = &target {
+                format!("Queued → {name}")
             } else {
                 "Queued".to_string()
             },
@@ -149,6 +162,8 @@ impl Manager {
             position: 0,
             resolve,
             subfolder: None,
+            target,
+            skip_existing,
         });
 
         id
@@ -261,17 +276,32 @@ impl Manager {
                 covers,
                 items,
             } => {
-                let parent_url = self
-                    .jobs
-                    .iter()
-                    .find(|job| job.id == id)
-                    .map(|job| job.url.clone())
-                    .unwrap_or_default();
+                let parent = self.jobs.iter().find(|job| job.id == id);
+                let parent_url = parent.map(|job| job.url.clone()).unwrap_or_default();
+                let target = parent.and_then(|job| job.target.clone());
+                let skip_existing = parent.map(|job| job.skip_existing).unwrap_or(false);
 
-                let subfolder = playlist
-                    .as_deref()
-                    .filter(|name| !name.is_empty() && *name != "NA")
-                    .map(download::sanitize_folder);
+                // The playlist chosen in the downloader panel wins over the
+                // remote playlist's own name. Nested library playlists use
+                // " / " in their display name, which maps back to a path.
+                let subfolder = match (&target, playlist.as_deref()) {
+                    (Some(name), _) => {
+                        Some(name.replace(" / ", std::path::MAIN_SEPARATOR_STR))
+                    }
+                    (None, Some(name)) if !name.is_empty() && name != "NA" => {
+                        Some(download::sanitize_folder(name))
+                    }
+                    (None, _) => None,
+                };
+
+                // Update mode: drop songs already sitting in the folder.
+                let (items, skipped) = if skip_existing {
+                    let folder = self.settings.root.join(subfolder.as_deref().unwrap_or(""));
+                    without_existing(items, &folder)
+                } else {
+                    (items, 0)
+                };
+                let found = items.len() + skipped;
 
                 let mut children = Vec::new();
                 if !items.is_empty() {
@@ -291,6 +321,8 @@ impl Manager {
                             position,
                             resolve: false,
                             subfolder: subfolder.clone(),
+                            target: None,
+                            skip_existing: false,
                         });
                     }
                 }
@@ -298,10 +330,12 @@ impl Manager {
                 if let Some(job) = self.jobs.iter_mut().find(|job| job.id == id) {
                     job.state = JobState::Done;
                     job.progress = Some(1.0);
-                    job.detail = if children.is_empty() {
+                    job.detail = if found == 0 {
                         "No tracks found".to_string()
-                    } else {
+                    } else if skipped == 0 {
                         format!("{} tracks queued", children.len())
+                    } else {
+                        format!("{} new · {} already in playlist", children.len(), skipped)
                     };
                     job.title = match playlist {
                         Some(name) if !name.is_empty() && name != "NA" => name,
@@ -316,12 +350,26 @@ impl Manager {
                     job.queue_index = index;
                 }
 
-                // Grab the playlist's own cover into its folder.
+                if skipped > 0 {
+                    self.log.push(format!(
+                        "Update: {skipped} of {found} songs were already in the playlist — skipped."
+                    ));
+                    if self.log.len() > 200 {
+                        self.log.remove(0);
+                    }
+                }
+
+                // Grab the playlist's own cover into its folder — unless one
+                // is already there (update mode keeps a custom cover).
                 if let Some(name) = subfolder {
                     let root = self.settings.root.clone();
                     let url = parent_url;
                     thread::spawn(move || {
-                        let _ = std::fs::create_dir_all(root.join(&name));
+                        let folder = root.join(&name);
+                        let _ = std::fs::create_dir_all(&folder);
+                        if folder.join("cover.jpg").is_file() {
+                            return;
+                        }
                         if !covers.is_empty()
                             && download::download_playlist_cover(&covers, &root, &name).is_ok()
                         {
@@ -400,6 +448,19 @@ impl Manager {
             .find(|job| job.id == id)
             .ok_or_else(|| "Job vanished".to_string())?;
 
+        // Resolved children carry their folder in `subfolder`; direct links
+        // fall back to the playlist chosen in the downloader panel. Nested
+        // library playlists use " / " in their display name, which maps
+        // back to a real path here.
+        let subfolder: Option<String> = job
+            .subfolder
+            .clone()
+            .or_else(|| {
+                job.target
+                    .clone()
+                    .map(|name| name.replace(" / ", std::path::MAIN_SEPARATOR_STR))
+            });
+
         let handle: Handle = if job.resolve {
             download::yt_dlp_resolve(&job.url)?
         } else {
@@ -409,12 +470,15 @@ impl Manager {
                     &self.settings.root,
                     self.settings.quality,
                     self.settings.parallel,
-                    download::is_list_url(&job.url),
+                    // Group by list name only when no playlist was picked;
+                    // a chosen folder overrides the grouping.
+                    download::is_list_url(&job.url) && job.target.is_none(),
+                    subfolder.as_deref(),
                 )?,
                 _ => download::yt_dlp_track(
                     &job.url,
                     &self.settings.root,
-                    job.subfolder.as_deref(),
+                    subfolder.as_deref(),
                     self.settings.quality,
                 )?,
             }
@@ -557,7 +621,9 @@ fn run_job(
                         });
                     }
                     let error = if entries.is_empty() {
-                        last_error.or_else(|| Some("No tracks found in that link.".to_string()))
+                        last_error
+                            .map(|line| friendly_error(&line))
+                            .or_else(|| Some("No tracks found in that link.".to_string()))
                     } else {
                         None
                     };
@@ -570,6 +636,7 @@ fn run_job(
                 } else {
                     let error = if !cancelled && code != Some(0) {
                         last_error
+                            .map(|line| friendly_error(&line))
                             .or_else(|| Some(format!("Downloader exited with code {:?}.", code)))
                     } else {
                         None
@@ -611,6 +678,62 @@ fn run_job(
                 return;
             }
         }
+    }
+}
+
+/// Update mode: splits the resolved playlist items into the ones still worth
+/// downloading and the count of those already present in `folder`. A song
+/// counts as present when its yt-dlp filename stem matches an existing file
+/// stem — exactly, raw, or ignoring punctuation and case.
+fn without_existing(
+    items: Vec<(String, String, u64)>,
+    folder: &std::path::Path,
+) -> (Vec<(String, String, u64)>, usize) {
+    let exact = download::folder_stems(folder);
+    if exact.is_empty() {
+        return (items, 0);
+    }
+
+    let loose: HashSet<String> = exact
+        .iter()
+        .map(|stem| download::normalize_stem(stem))
+        .filter(|stem| !stem.is_empty())
+        .collect();
+
+    let mut kept = Vec::new();
+    let mut skipped = 0;
+    for item in items {
+        let title = item.1.trim();
+        let stem = download::title_stem(title);
+        let raw = title.to_lowercase();
+        let normalized = download::normalize_stem(&stem);
+        if exact.contains(&stem)
+            || exact.contains(&raw)
+            || (!normalized.is_empty() && loose.contains(&normalized))
+        {
+            skipped += 1;
+        } else {
+            kept.push(item);
+        }
+    }
+    (kept, skipped)
+}
+
+/// Turns the raw tool output into something a user can act on. The one-file
+/// tools fail very early with PyInstaller's temp-folder errors when their
+/// environment is restricted; those lines mean nothing on their own.
+fn friendly_error(line: &str) -> String {
+    if line.contains("Could not create temporary directory")
+        || line.contains("Failed to create parent directory structure")
+        || line.contains("Failed to extract")
+    {
+        "The download tools could not start because Windows blocked their temporary folder. \
+         Close the player and start BR1 Player.exe by double-clicking it, then retry."
+            .to_string()
+    } else if line.contains("Permission denied") || line.contains("Access is denied") {
+        format!("{line} — the player cannot write there. Check the music folder permits writing.")
+    } else {
+        line.to_string()
     }
 }
 
@@ -662,5 +785,85 @@ fn stage_detail(line: &str) -> Option<String> {
         Some("Resolving…".to_string())
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(title: &str) -> (String, String, u64) {
+        ("https://youtu.be/x".to_string(), title.to_string(), 1)
+    }
+
+    #[test]
+    fn update_mode_skips_songs_already_in_the_folder() {
+        let dir = std::env::temp_dir().join("br1-player-update-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Known Song.mp3"), b"x").unwrap();
+        // Punctuation-only differences still count as the same track.
+        std::fs::write(dir.join("Other_ Song.mp3"), b"x").unwrap();
+
+        let items = vec![item("Known Song"), item("Other - Song"), item("Brand New Hit")];
+        let (kept, skipped) = without_existing(items, &dir);
+        assert_eq!(skipped, 2, "known songs should be recognised");
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].1, "Brand New Hit");
+    }
+
+    #[test]
+    fn update_mode_downloads_everything_into_an_empty_folder() {
+        let dir = std::env::temp_dir().join("br1-player-update-empty");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let items = vec![item("Anything"), item("Something else")];
+        let (kept, skipped) = without_existing(items, &dir);
+        assert_eq!(skipped, 0);
+        assert_eq!(kept.len(), 2);
+    }
+
+    #[test]
+    fn submit_captures_the_chosen_playlist_target() {
+        let mut manager = Manager::new(Settings {
+            root: PathBuf::from("Z:/music"),
+            quality: 192,
+            parallel: 2,
+        });
+        manager.submit(
+            "https://www.youtube.com/watch?v=abc".to_string(),
+            Some("My Mix".to_string()),
+            true,
+        );
+        let job = &manager.jobs[0];
+        assert_eq!(job.target.as_deref(), Some("My Mix"));
+        assert!(job.skip_existing);
+        assert_eq!(job.detail, "Queued → My Mix");
+
+        manager.submit("https://youtu.be/xyz".to_string(), None, false);
+        assert_eq!(manager.jobs[1].target, None);
+        assert_eq!(manager.jobs[1].detail, "Queued");
+    }
+
+    #[test]
+    fn tool_startup_failures_become_actionable_messages() {
+        for line in [
+            "[PYI-3644:ERROR] Could not create temporary directory!",
+            "[PYI-12:ERROR] Failed to create parent directory structure.",
+            "[PYI-99:ERROR] Failed to extract foo.pyd: failed to open target file!",
+        ] {
+            let message = friendly_error(line);
+            assert!(
+                message.contains("temporary folder"),
+                "raw tool text should be replaced: {message}"
+            );
+        }
+
+        assert_eq!(
+            friendly_error("[download] 100% of 3.7MiB"),
+            "[download] 100% of 3.7MiB"
+        );
+        assert!(friendly_error("fopen: Permission denied").contains("cannot write there"));
     }
 }
