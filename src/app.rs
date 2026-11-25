@@ -3145,13 +3145,10 @@ impl PlayerApp {
         };
         let art = rect.shrink(border_inset);
 
-        // The artwork is the panel's own background image. In the egui
-        // fallback look it paints on top of the card colour so nothing hides
-        // it; the real glass renderer instead refracts the background copy
-        // through the panel face, which keeps the control glass visible.
-        if !theme.real_glass {
-            self.paint_player_art(ui.painter(), rect, &theme);
-        }
+        // The artwork is the panel's own background image, painted here on top
+        // of the card (or the glass face) so nothing tints it: the theme
+        // colours the chrome, the cover stays exactly as it was mastered.
+        self.paint_player_art(ui.painter(), rect, &theme);
 
         let title = self
             .track()
@@ -7724,13 +7721,9 @@ impl PlayerApp {
                 &theme,
                 self.video.texture().or(self.background_tex.as_ref()),
             );
-            let content = Self::dashboard_content(frame_rect);
-            if self.config.ui.panels[PanelKind::Player.index()].visible {
-                let player = self.panel_rect(content, PanelKind::Player);
-                if player.width() > 40.0 && player.height() > 30.0 {
-                    self.paint_player_art(ui.painter(), player, &theme);
-                }
-            }
+            // The player artwork is painted by the player panel itself, on top
+            // of the panel card, so the themed card colour can never wash over
+            // the image.
             if self.settings_open {
                 ui.painter().rect_filled(
                     rect,
