@@ -321,7 +321,11 @@ impl PlayerApp {
             parallel: config.parallel,
         });
 
-        let installing = deps::needs_first_run();
+        // Run the installer whenever anything is missing, not only on the
+        // literal first run: an app update extracted to a fresh folder must
+        // re-fetch the tools exactly once (into the stable per-user bin),
+        // and never again on later updates.
+        let installing = deps::needs_first_run() || !deps::assets_ready();
         let saved_ui = config.ui.clone();
 
         let mut app = Self {
@@ -6803,15 +6807,6 @@ impl PlayerApp {
                 .size(9.5)
                 .color(theme.faint()),
             );
-            if self.config.ui.liquid.enabled {
-                ui.label(
-                    egui::RichText::new(
-                        "Liquid Glass is paused while a video background is active so the video is never covered.",
-                    )
-                    .size(9.5)
-                    .color(theme.faint()),
-                );
-            }
         }
         let video_label = self
             .config
@@ -7869,15 +7864,13 @@ impl PlayerApp {
                 let (top, frame_rect) = Self::layout_rects(rect);
 
                 if real_capable {
+                    // Glass stays active with a video background too; the
+                    // decoded video is painted in the background pass, so the
+                    // glass refracts it instead of covering it.
                     let show_dashboard = !self.settings_open;
-                    // The liquid-glass compositor uses the foreground as part
-                    // of its backdrop and can swallow the decoded video. Keep
-                    // the video background on the reliable egui path.
-                    let video_background = self.config.ui.background_video.is_some();
-                    self.theme.real_glass = show_dashboard && !video_background;
-                    self.theme.liquid.enabled = self.config.ui.liquid.enabled
-                        && show_dashboard
-                        && !video_background;
+                    self.theme.real_glass = show_dashboard;
+                    self.theme.liquid.enabled =
+                        self.config.ui.liquid.enabled && show_dashboard;
                 }
 
                 if !self.settings_open {

@@ -3,14 +3,16 @@
 //! The player itself is a single executable. On the very first launch — tracked
 //! by a marker in `%APPDATA%\DefPlayer` — it downloads:
 //!
-//! * `yt-dlp.exe`, `spotdl.exe`, `ffmpeg.exe` and `ffprobe.exe`, into a `bin`
-//!   folder next to the executable (or `%LOCALAPPDATA%\BR1 Player\bin` when
-//!   that folder is read-only), and
+//! * `yt-dlp.exe`, `spotdl.exe`, `ffmpeg.exe` and `ffprobe.exe`, into a stable
+//!   `bin` folder under `%LOCALAPPDATA%\BR1 Player` (or next to the exe for
+//!   portable installs), and
 //! * two measured MIT KEMAR SOFA HRTF sets into `%APPDATA%\DefPlayer\hrtf`.
 //!
 //! The loading screen shows the progress, and nothing is downloaded again on
-//! later starts. Settings → Downloads has a button that can re-run the same
-//! installer if a user later removes a file.
+//! later starts — the tools folder is remembered in `%APPDATA%\DefPlayer`, so
+//! even an app update into a different folder reuses the same binaries.
+//! Settings → Downloads has a button that can re-run the same installer if a
+//! user later removes a file.
 
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -307,6 +309,9 @@ fn run(sender: &Sender<Event>) -> Result<(), String> {
         status: "All set — starting BR1 Player…".to_string(),
         fraction: Some(1.0),
     });
+    // Remember where the tools live so later updates (which may run from a
+    // different folder) find them again without re-downloading.
+    crate::download::remember_tools_dir(&dir);
     Ok(())
 }
 

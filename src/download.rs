@@ -50,10 +50,46 @@ pub fn is_list_url(url: &str) -> bool {
         || lower.contains("/c/")
 }
 
+/// Path of the marker that remembers where the download tools live, so an app
+/// update running from a brand-new folder finds the same binaries instead of
+/// downloading them again.
+fn tools_marker_path() -> Option<PathBuf> {
+    crate::config::config_path().map(|path| path.with_file_name("tools_dir.txt"))
+}
+
+/// Records the tools folder so future app versions (in other folders) find
+/// the same binaries.
+pub fn remember_tools_dir(dir: &Path) {
+    let Some(path) = tools_marker_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, dir.display().to_string());
+}
+
 /// Folder that holds the bundled yt-dlp / spotdl / ffmpeg binaries.
 pub fn tools_dir() -> Option<PathBuf> {
+    // A folder that already served the tools on this machine. Remembered in
+    // `%APPDATA%\DefPlayer\tools_dir.txt`, so it is found again even when the
+    // app was updated into a different folder.
+    if let Some(saved) = tools_marker_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+    {
+        let dir = PathBuf::from(saved.trim());
+        if dir.join("yt-dlp.exe").is_file() {
+            return Some(dir);
+        }
+    }
+
     let mut candidates = Vec::new();
 
+    // Stable per-user folder that survives app updates.
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        candidates.push(PathBuf::from(local).join("BR1 Player").join("bin"));
+    }
+    // Portable installs keep the tools next to the exe.
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             candidates.push(dir.join("bin"));
@@ -76,14 +112,18 @@ pub fn tools_dir() -> Option<PathBuf> {
     if let Ok(cwd) = std::env::current_dir() {
         candidates.push(cwd.join("bin"));
     }
-    // Fallback for installs whose own folder is read-only (Program Files).
-    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        candidates.push(PathBuf::from(local).join("BR1 Player").join("bin"));
+
+    if let Some(dir) = candidates
+        .iter()
+        .find(|dir| dir.join("yt-dlp.exe").is_file())
+    {
+        remember_tools_dir(dir);
+        return Some(dir.clone());
     }
 
-    candidates
-        .into_iter()
-        .find(|dir| dir.join("yt-dlp.exe").is_file())
+    // Nothing installed yet: point at the stable per-user folder so the
+    // first download is never repeated after an update.
+    candidates.first().cloned()
 }
 
 fn tool(dir: &Path, name: &str) -> Result<PathBuf, String> {
