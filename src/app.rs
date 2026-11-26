@@ -426,9 +426,15 @@ impl PlayerApp {
             saved_at: Instant::now(),
         };
 
+        // Tests never need the real installer: letting it run would download
+        // hundreds of MB in the background of `cargo test` and make the
+        // suite timing- and network-dependent.
+        #[cfg(not(test))]
         if installing {
             app.start_install();
-        } else if configured {
+        }
+
+        if !installing && configured {
             let mut scan_paths = vec![app.library_root.clone()];
             scan_paths.extend(std::mem::take(&mut app.initial_paths));
             app.start_scan(scan_paths);
