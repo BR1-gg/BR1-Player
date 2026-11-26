@@ -52,7 +52,7 @@ pub fn is_list_url(url: &str) -> bool {
 
 /// Path of the marker that remembers where the download tools live, so an app
 /// update running from a brand-new folder finds the same binaries instead of
-/// downloading them again.
+/// downloading them again. Stored in `%APPDATA%\BR1 Player\tools_dir.txt`.
 fn tools_marker_path() -> Option<PathBuf> {
     crate::config::config_path().map(|path| path.with_file_name("tools_dir.txt"))
 }
@@ -72,8 +72,8 @@ pub fn remember_tools_dir(dir: &Path) {
 /// Folder that holds the bundled yt-dlp / spotdl / ffmpeg binaries.
 pub fn tools_dir() -> Option<PathBuf> {
     // A folder that already served the tools on this machine. Remembered in
-    // `%APPDATA%\DefPlayer\tools_dir.txt`, so it is found again even when the
-    // app was updated into a different folder.
+    // `%APPDATA%\BR1 Player\tools_dir.txt`, so it is found again even when
+    // the app was updated into a different folder.
     if let Some(saved) = tools_marker_path()
         .and_then(|path| std::fs::read_to_string(path).ok())
     {
@@ -148,7 +148,7 @@ pub fn tool_temp_dir() -> Option<PathBuf> {
         .get_or_init(|| {
             let mut candidates = Vec::new();
             if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-                candidates.push(PathBuf::from(local).join("DefPlayer").join("tmp"));
+                candidates.push(PathBuf::from(local).join("BR1 Player").join("tmp"));
             }
             candidates.push(std::env::temp_dir().join("br1-player-temp"));
             if let Some(dir) = tools_dir() {
@@ -168,11 +168,41 @@ pub fn tool_temp_dir() -> Option<PathBuf> {
                     continue;
                 }
                 let _ = std::fs::remove_file(&probe);
+                // Prune stale `_MEI…` folders the PyInstaller tools leave
+                // behind when a run is killed, so they cannot pile up.
+                prune_stale_unpacks(&dir);
                 return Some(dir);
             }
             None
         })
         .clone()
+}
+
+/// Removes PyInstaller `_MEI…` extraction folders older than an hour. Fresh
+/// ones belong to a tool that is running right now and are left alone.
+fn prune_stale_unpacks(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with("_MEI") {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .ok()
+            .and_then(|meta| meta.modified().ok())
+            .map(|modified| {
+                modified
+                    .elapsed()
+                    .map(|age| age > Duration::from_secs(3600))
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        if stale {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
 }
 
 /// Points a spawned tool at the player's own temp folder when one is usable.

@@ -1,15 +1,15 @@
 //! One-time installation of the external assets the app needs.
 //!
 //! The player itself is a single executable. On the very first launch — tracked
-//! by a marker in `%APPDATA%\DefPlayer` — it downloads:
+//! by a marker in `%APPDATA%\BR1 Player` — it downloads:
 //!
 //! * `yt-dlp.exe`, `spotdl.exe`, `ffmpeg.exe` and `ffprobe.exe`, into a stable
 //!   `bin` folder under `%LOCALAPPDATA%\BR1 Player` (or next to the exe for
 //!   portable installs), and
-//! * two measured MIT KEMAR SOFA HRTF sets into `%APPDATA%\DefPlayer\hrtf`.
+//! * two measured MIT KEMAR SOFA HRTF sets into `%APPDATA%\BR1 Player\hrtf`.
 //!
 //! The loading screen shows the progress, and nothing is downloaded again on
-//! later starts — the tools folder is remembered in `%APPDATA%\DefPlayer`, so
+//! later starts — the tools folder is remembered in `%APPDATA%\BR1 Player`, so
 //! even an app update into a different folder reuses the same binaries.
 //! Settings → Downloads has a button that can re-run the same installer if a
 //! user later removes a file.

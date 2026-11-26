@@ -1573,7 +1573,7 @@ impl PlayerApp {
         child.add_space(3.0);
         child.label(
             egui::RichText::new(
-                "First run only: BR1 Player downloads the tools it uses to find, convert and tag music, plus two measured KEMAR HRTF sets for binaural headphone audio. They are stored in bin/ and %APPDATA%\\DefPlayer\\hrtf and reused every time after that.",
+                "First run only: BR1 Player downloads the tools it uses to find, convert and tag music, plus two measured KEMAR HRTF sets for binaural headphone audio. They are stored in bin/ and %APPDATA%\\BR1 Player\\hrtf and reused every time after that.",
             )
             .size(12.5)
             .color(theme.muted()),

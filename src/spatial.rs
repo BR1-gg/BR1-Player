@@ -12,7 +12,7 @@
 //! Three synthetic HRTF sets are generated locally so the feature works with
 //! no downloads at all. They model ITD (Woodworth), head shadow (ILD), pinna
 //! reflections (elevation + front/back cues) and a torso reflection. Any SOFA
-//! file dropped into `%APPDATA%\DefPlayer\hrtf` is offered as an extra set.
+//! file dropped into `%APPDATA%\BR1 Player\hrtf` is offered as an extra set.
 
 use std::collections::HashMap;
 use std::f32::consts::{FRAC_PI_4, PI, SQRT_2, TAU};
@@ -123,10 +123,11 @@ pub struct HrtfSetInfo {
 
 /// Folder scanned for user-supplied SOFA files.
 pub fn hrtf_folder() -> PathBuf {
-    let base = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    base.join("DefPlayer").join("hrtf")
+    crate::config::appdata_dir()
+        .unwrap_or_else(|| {
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        })
+        .join("hrtf")
 }
 
 fn short_name(path: &Path) -> String {

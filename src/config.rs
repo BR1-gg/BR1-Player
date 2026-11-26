@@ -590,7 +590,7 @@ impl UiConfig {
     }
 }
 
-/// User settings, stored in %APPDATA%\DefPlayer\config.txt
+/// User settings, stored in %APPDATA%\BR1 Player\config.txt
 #[derive(Clone)]
 pub struct Config {
     /// Main folder: every download goes here. Playlists get an automatic subfolder.
@@ -628,13 +628,38 @@ pub fn default_library_root() -> PathBuf {
     base.join("Music").join("BR1 Player")
 }
 
+/// The player's own folder under `%APPDATA%`, e.g. `…\BR1 Player`.
+///
+/// Older versions used `DefPlayer`; that folder is renamed in place the
+/// first time this function runs, so settings, playlists, layouts and the
+/// first-run marker move along with it instead of being re-created.
+pub fn appdata_dir() -> Option<PathBuf> {
+    let base = std::env::var_os("APPDATA")?;
+    let dir = PathBuf::from(&base).join("BR1 Player");
+    let legacy = PathBuf::from(&base).join("DefPlayer");
+
+    static MIGRATED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    MIGRATED.get_or_init(|| {
+        if legacy.is_dir() && !dir.exists() {
+            let _ = std::fs::rename(&legacy, &dir);
+        }
+    });
+
+    // If the rename could not happen (folder locked, for example), keep
+    // using the legacy folder for this session instead of losing the data.
+    if dir.is_dir() || !legacy.is_dir() {
+        Some(dir)
+    } else {
+        Some(legacy)
+    }
+}
+
 pub fn config_path() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(|base| PathBuf::from(base).join("DefPlayer").join("config.txt"))
+    appdata_dir().map(|dir| dir.join("config.txt"))
 }
 
 fn legacy_settings_path() -> Option<PathBuf> {
-    std::env::var_os("APPDATA")
-        .map(|base| PathBuf::from(base).join("DefPlayer").join("settings.txt"))
+    appdata_dir().map(|dir| dir.join("settings.txt"))
 }
 
 fn parse_bool(value: &str) -> bool {
@@ -1370,7 +1395,7 @@ pub fn save(config: &Config) {
 
 /// Folder holding one `.txt` file per saved layout preset.
 pub fn layout_dir() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(|base| PathBuf::from(base).join("DefPlayer").join("layouts"))
+    appdata_dir().map(|dir| dir.join("layouts"))
 }
 
 /// Keeps preset names filesystem- and display-safe.
