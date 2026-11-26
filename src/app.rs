@@ -244,7 +244,12 @@ pub struct PlayerApp {
     spectrum: Vec<f32>,
     background_tex: Option<TextureHandle>,
     background_loaded: Option<PathBuf>,
+    /// Decoded photo kept in memory so blur changes do not re-read the file.
+    background_source: Option<image::RgbaImage>,
+    /// Blur strength currently baked into `background_tex`.
+    background_blur_applied: f32,
     video: VideoBackground,
+    video_error: Option<String>,
     drop_hovering: bool,
     sort_menu_open: bool,
     sort_menu_pos: egui::Pos2,
@@ -401,7 +406,10 @@ impl PlayerApp {
             spectrum: vec![0.0; SPECTRUM_BINS],
             background_tex: None,
             background_loaded: None,
+            background_source: None,
+            background_blur_applied: 0.0,
             video: VideoBackground::new(),
+            video_error: None,
             drop_hovering: false,
             sort_menu_open: false,
             sort_menu_pos: egui::Pos2::ZERO,
@@ -1819,29 +1827,75 @@ impl PlayerApp {
     }
 
     fn ensure_background(&mut self, ctx: &egui::Context) {
-        if self.background_loaded == self.config.ui.background_image {
+        const SOURCE_W: u32 = 1_920;
+        const SOURCE_H: u32 = 1_080;
+        // Blur is computed on a small copy and then scaled back up by the GPU;
+        // that keeps the slider responsive even for 4K photos.
+        const BLUR_W: u32 = 240;
+        const BLUR_H: u32 = 135;
+
+        let path_changed = self.background_loaded != self.config.ui.background_image;
+        let target_blur = self.config.ui.background_blur.clamp(0.0, 1.0);
+
+        // No photo configured: drop the cached copy so a blur change can never
+        // bring a cleared photo back on screen.
+        if self.config.ui.background_image.is_none() {
+            self.background_loaded = None;
+            self.background_source = None;
+            self.background_tex = None;
+            self.background_blur_applied = target_blur;
             return;
         }
-        self.background_loaded = self.config.ui.background_image.clone();
-        self.background_tex = match &self.config.ui.background_image {
-            Some(path) => match image::open(path) {
-                Ok(image) => {
-                    let image = image
-                        .resize_to_fill(1_920, 1_080, image::imageops::FilterType::Triangle)
-                        .to_rgba8();
-                    let color = egui::ColorImage::from_rgba_unmultiplied(
-                        [image.width() as usize, image.height() as usize],
-                        image.as_raw(),
-                    );
-                    Some(ctx.load_texture("background-photo", color, TextureOptions::LINEAR))
-                }
-                Err(error) => {
-                    self.notice(format!("Background photo: {error}"), true);
-                    None
-                }
-            },
-            None => None,
-        };
+
+        if !path_changed && (target_blur - self.background_blur_applied).abs() <= 0.004 {
+            return;
+        }
+
+        if path_changed {
+            self.background_loaded = self.config.ui.background_image.clone();
+            self.background_source = match &self.config.ui.background_image {
+                Some(path) => match image::open(path) {
+                    Ok(image) => Some(
+                        image
+                            .resize_to_fill(
+                                SOURCE_W,
+                                SOURCE_H,
+                                image::imageops::FilterType::Triangle,
+                            )
+                            .to_rgba8(),
+                    ),
+                    Err(error) => {
+                        self.notice(format!("Background photo: {error}"), true);
+                        None
+                    }
+                },
+                None => None,
+            };
+        }
+        self.background_blur_applied = target_blur;
+
+        self.background_tex = self.background_source.as_ref().map(|source| {
+            let color = if target_blur <= 0.004 {
+                egui::ColorImage::from_rgba_unmultiplied(
+                    [source.width() as usize, source.height() as usize],
+                    source.as_raw(),
+                )
+            } else {
+                let mut small = image::imageops::resize(
+                    source,
+                    BLUR_W,
+                    BLUR_H,
+                    image::imageops::FilterType::Triangle,
+                );
+                // 8 px at the small scale is roughly 64 px on the dashboard.
+                small = image::imageops::blur(&small, target_blur * 8.0);
+                egui::ColorImage::from_rgba_unmultiplied(
+                    [BLUR_W as usize, BLUR_H as usize],
+                    small.as_raw(),
+                )
+            };
+            ctx.load_texture("background-photo", color, TextureOptions::LINEAR)
+        });
     }
 
     fn choose_background(&mut self) {
@@ -1853,6 +1907,7 @@ impl PlayerApp {
             self.config.ui.background_image = Some(path);
             self.config.ui.background_video = None;
             self.background_loaded = None;
+            self.video_error = None;
             self.save_config();
         }
     }
@@ -1866,6 +1921,14 @@ impl PlayerApp {
             self.config.ui.background_video = Some(path);
             self.config.ui.background_image = None;
             self.background_loaded = None;
+            self.video_error = None;
+            if self.config.ui.background_dim > 0.60 {
+                self.config.ui.background_dim = 0.35;
+                self.notice(
+                    "Background video added. DIM was lowered so the video is visible.",
+                    false,
+                );
+            }
             self.save_config();
         }
     }
@@ -1873,10 +1936,15 @@ impl PlayerApp {
     /// Drives the looping video background (decoded by the bundled ffmpeg).
     fn sync_video(&mut self, ctx: &egui::Context) {
         let path = self.config.ui.background_video.clone();
-        self.video.sync(path.as_ref(), ctx);
+        self.video
+            .sync(path.as_ref(), self.config.ui.background_blur, ctx);
         self.video.update();
         if let Some(error) = self.video.take_error() {
+            self.video_error = Some(error.clone());
             self.notice(error, true);
+        }
+        if self.video.is_running() && self.video.texture().is_some() {
+            self.video_error = None;
         }
         if self.video.is_running() {
             ctx.request_repaint();
@@ -3292,7 +3360,7 @@ impl PlayerApp {
         } else {
             Glyph::Play
         };
-        if ui::glyph_button(
+        if ui::glyph_button_solid(
             ui,
             prev_rect,
             "player-prev",
@@ -3305,7 +3373,7 @@ impl PlayerApp {
         {
             self.previous();
         }
-        if ui::glyph_button(
+        if ui::glyph_button_solid(
             ui,
             play_rect,
             "player-play",
@@ -3318,7 +3386,7 @@ impl PlayerApp {
         {
             self.toggle_play();
         }
-        if ui::glyph_button(
+        if ui::glyph_button_solid(
             ui,
             next_rect,
             "player-next",
@@ -3337,7 +3405,7 @@ impl PlayerApp {
                 Rect::from_center_size(pos2(left + 38.0, controls_y), vec2(76.0, 24.0));
             let repeat_rect =
                 Rect::from_center_size(pos2(left + 122.0, controls_y), vec2(82.0, 24.0));
-            if ui::chip(
+            if ui::chip_solid(
                 ui,
                 shuffle_rect,
                 "shuffle",
@@ -3355,7 +3423,7 @@ impl PlayerApp {
                 Repeat::All => "REPEAT ALL",
                 Repeat::One => "REPEAT 1",
             };
-            if ui::chip(
+            if ui::chip_solid(
                 ui,
                 repeat_rect,
                 "repeat",
@@ -3380,7 +3448,7 @@ impl PlayerApp {
                 pos2(mute.left() - 106.0, controls_y - 9.0),
                 pos2(mute.left() - 10.0, controls_y + 9.0),
             );
-            if ui::glyph_button(
+            if ui::glyph_button_solid(
                 ui,
                 mute,
                 "player-mute",
@@ -6723,17 +6791,27 @@ impl PlayerApp {
             .clicked()
             {
                 self.config.ui.background_video = None;
+                self.video_error = None;
                 self.save_config();
             }
         });
         if self.config.ui.background_video.is_some() {
             ui.label(
                 egui::RichText::new(
-                    "A looping video replaces the photo. It is decoded at 1280x720 with the bundled ffmpeg and dimmed by the slider below.",
+                    "A looping video replaces the photo. It is decoded at 1280x720 with the bundled ffmpeg and dimmed by the slider below. The blur slider applies to both photos and videos.",
                 )
                 .size(9.5)
                 .color(theme.faint()),
             );
+            if self.config.ui.liquid.enabled {
+                ui.label(
+                    egui::RichText::new(
+                        "Liquid Glass is paused while a video background is active so the video is never covered.",
+                    )
+                    .size(9.5)
+                    .color(theme.faint()),
+                );
+            }
         }
         let video_label = self
             .config
@@ -6750,6 +6828,11 @@ impl PlayerApp {
             )
             .truncate(),
         );
+        if let Some(error) = &self.video_error {
+            ui.add(
+                egui::Label::new(egui::RichText::new(error).size(9.5).color(theme.danger())).wrap(),
+            );
+        }
         let label = self
             .config
             .ui
@@ -6770,11 +6853,19 @@ impl PlayerApp {
         }
         let mut dim = self.config.ui.background_dim;
         if ui
-            .add(egui::Slider::new(&mut dim, 0.0..=1.0).text("Photo dim"))
+            .add(egui::Slider::new(&mut dim, 0.0..=1.0).text("Background dim"))
             .changed()
         {
             self.config.ui.background_dim = dim;
             self.refresh_theme(ui.ctx());
+            self.save_config();
+        }
+        let mut blur = self.config.ui.background_blur;
+        if ui
+            .add(egui::Slider::new(&mut blur, 0.0..=1.0).text("Background blur"))
+            .changed()
+        {
+            self.config.ui.background_blur = blur;
             self.save_config();
         }
 
@@ -6806,6 +6897,7 @@ impl PlayerApp {
             self.config.ui.background_color = defaults.background_color;
             self.config.ui.background_image = None;
             self.config.ui.background_dim = defaults.background_dim;
+            self.config.ui.background_blur = defaults.background_blur;
             self.background_loaded = None;
             self.background_tex = None;
             self.refresh_theme(ui.ctx());
@@ -7778,9 +7870,14 @@ impl PlayerApp {
 
                 if real_capable {
                     let show_dashboard = !self.settings_open;
-                    self.theme.real_glass = show_dashboard;
-                    self.theme.liquid.enabled =
-                        self.config.ui.liquid.enabled && show_dashboard;
+                    // The liquid-glass compositor uses the foreground as part
+                    // of its backdrop and can swallow the decoded video. Keep
+                    // the video background on the reliable egui path.
+                    let video_background = self.config.ui.background_video.is_some();
+                    self.theme.real_glass = show_dashboard && !video_background;
+                    self.theme.liquid.enabled = self.config.ui.liquid.enabled
+                        && show_dashboard
+                        && !video_background;
                 }
 
                 if !self.settings_open {
@@ -8465,6 +8562,9 @@ mod playlist_feature_tests {
         app.config.ui.panels[PanelKind::CurrentPlaylist.index()] =
             UiConfig::default().panels[PanelKind::CurrentPlaylist.index()];
         app.config.ui.track_sort = TrackSort::Added;
+        // The player loads the real user config, which may point at a
+        // playlist; tests must start from "All music" to be reproducible.
+        app.download_target = None;
         (ctx, app)
     }
 

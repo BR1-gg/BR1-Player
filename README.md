@@ -29,9 +29,10 @@ It is a portable Windows app with no account, no cloud library and no installer.
   switches the whole renderer; while it is off — or while the component is not on
   the dashboard — playback stays untouched stereo.
 - **Make it yours** — eight theme presets, a custom gradient and frame, your own
-  photo or looping video background, optional Liquid Glass surfaces, and
-  draggable/resizable dashboard panels. Add, remove and arrange the components
-  from the `+` menu.
+  photo or looping video background with independent DIM and BLUR controls
+  (Liquid Glass pauses automatically while a video is active), optional Liquid
+  Glass surfaces, and draggable/resizable dashboard panels. Add, remove and
+  arrange the components from the `+` menu.
 - **Keep it local** — your music, settings and playback stay on your computer.
   No account and no cloud library.
 

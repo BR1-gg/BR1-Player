@@ -269,43 +269,86 @@ pub fn glyph_button(
     theme: &Theme,
     slot: GlassSlot,
 ) -> Response {
+    glyph_button_inner(ui, rect, id, glyph, filled, theme, slot, false)
+}
+
+/// A glyph button that always paints its button face in egui. The player uses
+/// this because its artwork is drawn above the real glass pass, which would
+/// otherwise leave prev/play/next looking like floating icons.
+pub fn glyph_button_solid(
+    ui: &Ui,
+    rect: Rect,
+    id: &str,
+    glyph: Glyph,
+    filled: bool,
+    theme: &Theme,
+    slot: GlassSlot,
+) -> Response {
+    glyph_button_inner(ui, rect, id, glyph, filled, theme, slot, true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn glyph_button_inner(
+    ui: &Ui,
+    rect: Rect,
+    id: &str,
+    glyph: Glyph,
+    filled: bool,
+    theme: &Theme,
+    slot: GlassSlot,
+    solid: bool,
+) -> Response {
     let response = ui
         .interact(rect, ui.scope_id().with(id), Sense::click())
         .on_hover_cursor(CursorIcon::PointingHand);
     let painter = ui.painter();
 
-    let glass = crate::glass::paint_button(
-        painter,
-        rect,
-        theme,
-        response.hovered(),
-        response.is_pointer_button_down_on(),
-        false,
-        filled,
-        slot,
-    );
+    let glass = !solid
+        && crate::glass::paint_button(
+            painter,
+            rect,
+            theme,
+            response.hovered(),
+            response.is_pointer_button_down_on(),
+            false,
+            filled,
+            slot,
+        );
 
     if !glass {
-        let background = if filled {
-            if response.hovered() {
+        // Non-glass fallback: every transport control keeps a visible button
+        // face, otherwise prev/next/mute read as floating glyphs once Liquid
+        // Glass is paused (for example behind a video background).
+        let (background, border) = if filled {
+            let fill = if response.hovered() {
                 theme::lerp_color(theme.accent_a, Color32::WHITE, 0.14)
             } else {
                 theme.accent_a
-            }
+            };
+            (fill, Color32::from_rgba_unmultiplied(255, 255, 255, 70))
+        } else if response.is_pointer_button_down_on() {
+            (
+                with_alpha(theme.accent_a, 95),
+                with_alpha(theme.accent_a, 175),
+            )
         } else if response.hovered() {
-            Color32::from_rgba_unmultiplied(255, 255, 255, 20)
+            (
+                Color32::from_rgba_unmultiplied(255, 255, 255, 34),
+                with_alpha(theme.accent_a, 120),
+            )
         } else {
-            Color32::TRANSPARENT
+            (
+                Color32::from_rgba_unmultiplied(255, 255, 255, 20),
+                with_alpha(theme.accent_a, 60),
+            )
         };
 
         painter.circle_filled(rect.center(), rect.width() * 0.5, background);
-        if filled {
-            painter.circle_stroke(
-                rect.center(),
-                rect.width() * 0.5,
-                Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 60)),
-            );
-        }
+        painter.circle_stroke(
+            rect.center(),
+            rect.width() * 0.5,
+            Stroke::new(1.0_f32, border),
+        );
     }
     paint_glyph(
         painter,
@@ -424,20 +467,61 @@ pub fn chip(
     theme: &Theme,
     slot: GlassSlot,
 ) -> Response {
+    chip_inner(ui, rect, id, label, active, theme, slot, false)
+}
+
+/// A chip that always paints its pill face in egui, for use over artwork where
+/// the real glass pass is hidden.
+pub fn chip_solid(
+    ui: &Ui,
+    rect: Rect,
+    id: &str,
+    label: &str,
+    active: bool,
+    theme: &Theme,
+    slot: GlassSlot,
+) -> Response {
+    chip_inner(ui, rect, id, label, active, theme, slot, true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn chip_inner(
+    ui: &Ui,
+    rect: Rect,
+    id: &str,
+    label: &str,
+    active: bool,
+    theme: &Theme,
+    slot: GlassSlot,
+    solid: bool,
+) -> Response {
     let response = ui
         .interact(rect, ui.scope_id().with(id), Sense::click())
         .on_hover_cursor(CursorIcon::PointingHand);
     let painter = ui.painter();
-    theme::paint_pill(
-        painter,
-        rect,
-        theme,
-        response.hovered(),
-        response.is_pointer_button_down_on(),
-        active,
-        false,
-        slot,
-    );
+    if solid {
+        theme::paint_pill_solid(
+            painter,
+            rect,
+            theme,
+            response.hovered(),
+            response.is_pointer_button_down_on(),
+            active,
+            false,
+            slot,
+        );
+    } else {
+        theme::paint_pill(
+            painter,
+            rect,
+            theme,
+            response.hovered(),
+            response.is_pointer_button_down_on(),
+            active,
+            false,
+            slot,
+        );
+    }
     painter.text(
         rect.center(),
         Align2::CENTER_CENTER,

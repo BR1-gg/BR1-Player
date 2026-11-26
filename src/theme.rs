@@ -564,9 +564,47 @@ pub fn paint_pill(
     primary: bool,
     slot: crate::glass::GlassSlot,
 ) {
-    if crate::glass::paint_button(
-        painter, rect, theme, hovered, pressed, active, primary, slot,
-    ) {
+    paint_pill_inner(
+        painter, rect, theme, hovered, pressed, active, primary, slot, false,
+    );
+}
+
+/// Like [`paint_pill`], but always paints the egui face. Used for controls
+/// drawn over the player artwork, where the real glass pass sits underneath
+/// and would be hidden by the cover.
+#[allow(clippy::too_many_arguments)]
+pub fn paint_pill_solid(
+    painter: &Painter,
+    rect: Rect,
+    theme: &Theme,
+    hovered: bool,
+    pressed: bool,
+    active: bool,
+    primary: bool,
+    slot: crate::glass::GlassSlot,
+) {
+    paint_pill_inner(
+        painter, rect, theme, hovered, pressed, active, primary, slot, true,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_pill_inner(
+    painter: &Painter,
+    rect: Rect,
+    theme: &Theme,
+    hovered: bool,
+    pressed: bool,
+    active: bool,
+    primary: bool,
+    slot: crate::glass::GlassSlot,
+    solid: bool,
+) {
+    if !solid
+        && crate::glass::paint_button(
+            painter, rect, theme, hovered, pressed, active, primary, slot,
+        )
+    {
         return;
     }
     let radius = rect.height() * 0.5;
@@ -588,9 +626,9 @@ pub fn paint_pill(
     let fill = if active {
         with_alpha(theme.accent_a, 72)
     } else if hovered {
-        Color32::from_rgba_unmultiplied(255, 255, 255, 26)
+        Color32::from_rgba_unmultiplied(255, 255, 255, 34)
     } else {
-        Color32::from_rgba_unmultiplied(255, 255, 255, 13)
+        Color32::from_rgba_unmultiplied(255, 255, 255, 22)
     };
     painter.rect_filled(rect, radius, fill);
     painter.rect_stroke(
@@ -603,9 +641,9 @@ pub fn paint_pill(
                 if active {
                     100
                 } else if hovered {
-                    60
+                    85
                 } else {
-                    26
+                    48
                 },
             ),
         ),

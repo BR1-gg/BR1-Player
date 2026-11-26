@@ -462,6 +462,8 @@ pub struct UiConfig {
     pub background_video: Option<PathBuf>,
     /// How much the background photo/video is darkened (0..1).
     pub background_dim: f32,
+    /// How strongly the background photo/video is blurred (0..1).
+    pub background_blur: f32,
     pub panels: [PanelRect; PANEL_COUNT],
     pub eq_enabled: bool,
     pub eq_gains: [f32; EQ_BANDS],
@@ -518,6 +520,7 @@ impl Default for UiConfig {
             background_image: None,
             background_video: None,
             background_dim: 0.0,
+            background_blur: 0.0,
             panels: [
                 // Current playlist (left)
                 PanelRect::new(0.02445, 0.04702, 0.20016, 0.58934),
@@ -839,6 +842,11 @@ pub fn load_from(path: &Path) -> Option<Config> {
                     ui.background_dim = parsed.clamp(0.0, 1.0);
                 }
             }
+            "ui_background_blur" => {
+                if let Ok(parsed) = value.parse::<f32>() {
+                    ui.background_blur = parsed.clamp(0.0, 1.0);
+                }
+            }
             "eq_enabled" => ui.eq_enabled = parse_bool(value),
             "eq_gains" => {
                 if let Some(gains) = parse_eq(value) {
@@ -1058,6 +1066,7 @@ pub fn save_to(path: &Path, config: &Config) {
          ui_background_image={}\n\
          ui_background_video={}\n\
          ui_background_dim={:.3}\n\
+         ui_background_blur={:.3}\n\
          eq_enabled={}\n\
          eq_gains={}\n\
          ui_spatial_x={:.4}\n\
@@ -1110,6 +1119,7 @@ pub fn save_to(path: &Path, config: &Config) {
             .map(|path| path.display().to_string())
             .unwrap_or_default(),
         ui.background_dim,
+        ui.background_blur,
         if ui.eq_enabled { 1 } else { 0 },
         ui.eq_gains
             .iter()
@@ -1442,6 +1452,7 @@ pub fn apply_layout(target: &mut UiConfig, from: &UiConfig) {
     target.background_image = from.background_image.clone();
     target.background_video = from.background_video.clone();
     target.background_dim = from.background_dim;
+    target.background_blur = from.background_blur;
     target.component_gap = from.component_gap;
     target.panels = from.panels;
     target.liquid = from.liquid;
@@ -1503,6 +1514,7 @@ mod tests {
         original.ui.background_color = [20, 30, 40];
         original.ui.background_image = Some(PathBuf::from(r"C:\Pictures\backdrop.png"));
         original.ui.background_dim = 0.4;
+        original.ui.background_blur = 0.65;
         original.ui.panels[1] = PanelRect {
             x: 0.21,
             y: 0.05,
@@ -1544,6 +1556,7 @@ mod tests {
             Some(PathBuf::from(r"C:\Pictures\backdrop.png"))
         );
         assert_eq!(loaded.ui.background_dim, 0.4);
+        assert_eq!(loaded.ui.background_blur, 0.65);
         assert_eq!(loaded.ui.eq_gains[3], 4.5);
         assert_eq!(loaded.ui.liquid.transparency, 0.75);
         assert!(!loaded.ui.liquid.dark);
